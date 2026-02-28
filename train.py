@@ -11,7 +11,17 @@ from peft import LoraConfig, get_peft_model
 from transformers import BitsAndBytesConfig, AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
 from logutil import init_logger, get_logger
 
-# Import module của bạn
+# 1. ĐỌC CONFIG VÀ KHỞI TẠO LOGGER NGAY LẬP TỨC (TRƯỚC KHI IMPORT MODEL)
+with open("internvl_config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+
+base_out_dir = config['training']['output_dir']
+output_dir = f'{base_out_dir}/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
+os.makedirs(output_dir, exist_ok=True)
+init_logger(output_dir)
+logger = get_logger()
+
+# 2. BÂY GIỜ MỚI IMPORT CÁC MODULE CỦA BẠN (Đã an toàn)
 from wad_dataset import build_dataset  
 from model.modeling_internvl_chat import InternVLChatModel
 from model.conversation import get_conv_template
@@ -198,19 +208,9 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
 
 if __name__ == "__main__":
-    # 1. Đọc file config yaml
-    with open("internvl_config.yaml", "r") as f:
-        config = yaml.safe_load(f)
 
     model_name_or_path = config['model']['name']
     batch_size = config['training']['batch_size']
-    
-    # Tạo thư mục log dựa trên config YAML thay vì fix cứng
-    base_out_dir = config['training']['output_dir']
-    output_dir = f'{base_out_dir}/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
-    os.makedirs(output_dir, exist_ok=True)
-    init_logger(output_dir)
-    logger = get_logger()
 
     with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, record_shapes=True) as prof:
         
@@ -286,4 +286,4 @@ if __name__ == "__main__":
             val_loader_with_shuffle=val_loader_with_shuffle, 
             config=config,
             output_dir=output_dir
-        )
+        )y
