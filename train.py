@@ -95,7 +95,7 @@ def test_model(model, val_loader_with_shuffle, shuffle=False):
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
                 logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
             total_test_batches += 1
-            if total_test_batches == 5:
+            if total_test_batches == 2:
                 break
 
 def eval_model(model, val_loader, step, epoch, epochs):
@@ -117,14 +117,14 @@ def eval_model(model, val_loader, step, epoch, epochs):
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
-            if total_eval_batchs == 60:
+            if total_eval_batchs == 200:
                 break
         logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {total_eval_loss / total_eval_batchs}")
 
 
-def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs, lr=1e-6):
-    logger.info(f"total params for Lora training: {sum(p.numel() for p in model.parameters())}")
-    logger.info(f"total trainable params for Lora training: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs, lr=1e-6, output_dir="train_output"):
+    logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
+    logger.info(f"Trainable params for LoRA: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     optimizer = AdamW(model.parameters(), lr=lr)
     lr_scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=epochs)
@@ -134,27 +134,37 @@ def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs
         model.train()
         optimizer.zero_grad()
         i = 0
+        accumulated_loss_for_log = 0.0 
+        
         for batch in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{epochs}"):
             i += 1
-            accumulated_avg_loss = 0
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, _ = batch
+            
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
             pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+
             outputs = model(
-                input_ids=input_ids_batch, pixel_values=pixel_values_batch, labels=label_ids_batch, image_flags=image_flags_batch, return_dict=True
+                input_ids=input_ids_batch, 
+                pixel_values=pixel_values_batch, 
+                labels=label_ids_batch, 
+                image_flags=image_flags_batch, 
+                return_dict=True
             )
             
             loss = outputs.loss / NUM_ACCUMULATION_STEPS
-            accumulated_avg_loss += loss.item()
             loss.backward()
             
+            accumulated_loss_for_log += outputs.loss.item()
+            
             if i % NUM_ACCUMULATION_STEPS == 0:
-                logger.info(f"Batch {i} of epoch {epoch + 1}/{epochs}, average training loss of previous {NUM_ACCUMULATION_STEPS} batches: {accumulated_avg_loss}")
-                accumulated_avg_loss = 0
+                avg_loss = accumulated_loss_for_log / NUM_ACCUMULATION_STEPS
+                logger.info(f"Step {i//NUM_ACCUMULATION_STEPS} | Avg Loss (last 8 batches): {avg_loss:.4f}")
+                
+                accumulated_loss_for_log = 0.0 
+                
                 optimizer.step()
                 optimizer.zero_grad()
             
@@ -162,12 +172,18 @@ def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs
                 eval_model(model, val_loader, i, epoch, epochs)
                 test_model(model, val_loader_with_shuffle, shuffle=True)
                 model.train()
+                
+            if i % 1000 == 0: 
+                step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
+                os.makedirs(step_save_dir, exist_ok=True)
+                logger.info(f"Saving model at step {i} to {step_save_dir}")
+                model.language_model.save_pretrained(step_save_dir)
         
         lr_scheduler.step()
-        os.makedirs(f"{output_dir}/epoch_{epoch+1}/", exist_ok=True)
-        logger.info(f"Saving model {output_dir}/epoch_{epoch+1}/pytorch_model.finetuned.by.us.bin")
-        # Chỉ lưu trọng số LoRA để tiết kiệm dung lượng
-        model.language_model.save_pretrained(f"{output_dir}/epoch_{epoch+1}/") 
+        epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
+        os.makedirs(epoch_save_dir, exist_ok=True)
+        logger.info(f"Saving model for epoch {epoch+1} to {epoch_save_dir}")
+        model.language_model.save_pretrained(epoch_save_dir)
 
 
 if __name__ == "__main__":
@@ -198,7 +214,7 @@ if __name__ == "__main__":
             low_cpu_mem_usage=True,
             trust_remote_code=True
         )
-        
+
         model.config.use_cache = False  # Tắt cache (bắt buộc khi train)
         model.gradient_checkpointing_enable()
         # Dùng AutoTokenizer thay vì Qwen2Tokenizer
