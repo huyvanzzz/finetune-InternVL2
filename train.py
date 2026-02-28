@@ -190,8 +190,8 @@ if __name__ == "__main__":
         # 3. Load model (KHÔNG GỌI .cuda() ở đây vì bitsandbytes tự động đẩy lên GPU)
         logger.info(f"Loading model {model_name_or_path} in 4-bit...")
         model = AutoModel.from_pretrained(
-            model_name_or_path, 
-            torch_dtype=torch.bfloat16, 
+            model_name_or_path,
+            torch_dtype=torch.bfloat16,
             quantization_config=quantization_config,
             low_cpu_mem_usage=True,
             trust_remote_code=True
@@ -216,6 +216,7 @@ if __name__ == "__main__":
         )
         
         model.language_model = get_peft_model(model.language_model, peft_config)
+        print(model.language_model)
         model.language_model.print_trainable_parameters()
         model.train() 
 
