@@ -1,40 +1,33 @@
 import torch
 import os
-import yaml  # Thêm thư viện đọc yaml
+import yaml
+import datetime
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR
 from torch.nn.utils.rnn import pad_sequence
 from torch.profiler import profile, ProfilerActivity
 from tqdm import tqdm
 from peft import LoraConfig, get_peft_model
-from transformers import BitsAndBytesConfig
+from transformers import BitsAndBytesConfig, AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
 from logutil import init_logger, get_logger
-import datetime
 
-output_dir = f'train_output/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
-init_logger(output_dir)
-logger = get_logger()
-
-# Import dataset build function của bạn
+# Import module của bạn
 from wad_dataset import build_dataset  
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from model.modeling_internvl_chat import InternVLChatModel
-from transformers import AutoModel, AutoTokenizer
 from model.conversation import get_conv_template
 
-
-IMG_START_TOKEN='<img>'
-IMG_END_TOKEN='</img>'
-IMG_CONTEXT_TOKEN='<IMG_CONTEXT>'
+IMG_START_TOKEN = '<img>'
+IMG_END_TOKEN = '</img>'
+IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
 
 class CollaterFn:
-    def __init__(self, tokenizer) -> None:
+    def __init__(self, tokenizer, model) -> None:
         self.tokenizer = tokenizer
+        self.model = model # Truyền model vào thay vì dùng biến global
     
     def __call__(self, batch):
         label_ids_batch = []
@@ -49,8 +42,8 @@ class CollaterFn:
             pixel_values = sample['pixel_values']
             samples_batch.append(sample)
 
-            template = get_conv_template(model.template)
-            template.system_message = model.system_message
+            template = get_conv_template(self.model.template)
+            template.system_message = self.model.system_message
             eos_token_id = self.tokenizer.convert_tokens_to_ids(template.sep) 
             eot_token_id = self.tokenizer.convert_tokens_to_ids("<|endoftext|>")
 
@@ -60,14 +53,14 @@ class CollaterFn:
 
             num_patches_list = [pixel_values.shape[0]]
             for num_patches in num_patches_list:
-                image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * model.num_image_token * num_patches + IMG_END_TOKEN
+                image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
                 query = query.replace('<image>', image_tokens, 1)
             
             input_ids = self.tokenizer.encode(query)
             answer_ids = self.tokenizer.encode(answer)
             
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
-            input_ids = input_ids + answer_ids +[eos_token_id]
+            input_ids = input_ids + answer_ids + [eos_token_id]
             attention_mask = [1] * len(input_ids)
             assert len(input_ids) == len(attention_mask) == len(label_ids)
 
@@ -81,13 +74,12 @@ class CollaterFn:
         attention_mask_tensor = maybe_pad(attention_mask_batch, 0)
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, torch.cat(pixel_values_batch), samples_batch
 
-def test_model(model, val_loader_with_shuffle, shuffle=False):
-    # (Giữ nguyên như cũ)
+def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
     model.eval()
     with torch.no_grad():
         total_test_batches = 0
-        for batch in tqdm(val_loader_with_shuffle if shuffle else val_loader):
-            _, _, _, _, samples = batch # Bỏ pixel_values_batch thừa
+        for batch in tqdm(val_loader_with_shuffle):
+            _, _, _, _, samples = batch 
             for sample in samples:
                 pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
@@ -99,7 +91,6 @@ def test_model(model, val_loader_with_shuffle, shuffle=False):
                 break
 
 def eval_model(model, val_loader, step, epoch, epochs):
-    # (Giữ nguyên như cũ)
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
@@ -111,6 +102,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
             attention_mask_batch = attention_mask_batch.cuda()
             pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+            
             outputs = model(
                 input_ids=input_ids_batch, pixel_values=pixel_values_batch, labels=label_ids_batch, image_flags=image_flags_batch, return_dict=True
             )
@@ -119,16 +111,31 @@ def eval_model(model, val_loader, step, epoch, epochs):
             total_eval_batchs += 1
             if total_eval_batchs == 200:
                 break
-        logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {total_eval_loss / total_eval_batchs}")
+        logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {total_eval_loss / total_eval_batchs:.4f}")
 
+def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir):
+    # 1. Trích xuất tham số từ config
+    epochs = config['training']['num_epochs']
+    lr = float(config['training']['learning_rate'])
+    accum_steps = config['training']['gradient_accumulation_steps']
+    weight_decay = float(config['training']['weight_decay'])
+    warmup_steps = config['training']['warmup_steps']
+    max_grad_norm = float(config['training']['max_grad_norm'])
 
-def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs, lr=1e-6, output_dir="train_output"):
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params for LoRA: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
-    optimizer = AdamW(model.parameters(), lr=lr)
-    lr_scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=epochs)
-    NUM_ACCUMULATION_STEPS = 8
+    # 2. Khởi tạo Optimizer có Weight Decay
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    # 3. Sử dụng Cosine Scheduler (Chuẩn mực cho LLM)
+    total_training_steps = (len(train_loader) * epochs) // accum_steps
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_training_steps
+    )
     
     for epoch in range(epochs):
         model.train()
@@ -154,36 +161,40 @@ def train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs
                 return_dict=True
             )
             
-            loss = outputs.loss / NUM_ACCUMULATION_STEPS
+            loss = outputs.loss / accum_steps
             loss.backward()
             
             accumulated_loss_for_log += outputs.loss.item()
             
-            if i % NUM_ACCUMULATION_STEPS == 0:
-                avg_loss = accumulated_loss_for_log / NUM_ACCUMULATION_STEPS
-                logger.info(f"Step {i//NUM_ACCUMULATION_STEPS} | Avg Loss (last 8 batches): {avg_loss:.4f}")
+            if i % accum_steps == 0:
+                # 4. Gradient Clipping (Tránh nổ Loss)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 
+                avg_loss = accumulated_loss_for_log / accum_steps
+                logger.info(f"Step {i//accum_steps} | Avg Loss (last {accum_steps} batches): {avg_loss:.4f}")
                 accumulated_loss_for_log = 0.0 
                 
                 optimizer.step()
+                lr_scheduler.step() # Chuyển scheduler vào tính theo từng step
                 optimizer.zero_grad()
             
-            if i % 200 == 0:
+            if i % config['training']['eval_steps'] == 0:
                 eval_model(model, val_loader, i, epoch, epochs)
-                test_model(model, val_loader_with_shuffle, shuffle=True)
+                test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
                 model.train()
                 
-            if i % 1000 == 0: 
+            if i % config['training']['save_steps'] == 0: 
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
                 os.makedirs(step_save_dir, exist_ok=True)
-                logger.info(f"Saving model at step {i} to {step_save_dir}")
+                logger.info(f"Saving model and tokenizer at step {i} to {step_save_dir}")
                 model.language_model.save_pretrained(step_save_dir)
+                tokenizer.save_pretrained(step_save_dir) # Lưu cả tokenizer
         
-        lr_scheduler.step()
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
         os.makedirs(epoch_save_dir, exist_ok=True)
-        logger.info(f"Saving model for epoch {epoch+1} to {epoch_save_dir}")
+        logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
         model.language_model.save_pretrained(epoch_save_dir)
+        tokenizer.save_pretrained(epoch_save_dir)
 
 
 if __name__ == "__main__":
@@ -192,39 +203,47 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     model_name_or_path = config['model']['name']
-    epochs = config['training']['num_epochs']
     batch_size = config['training']['batch_size']
+    
+    # Tạo thư mục log dựa trên config YAML thay vì fix cứng
+    base_out_dir = config['training']['output_dir']
+    output_dir = f'{base_out_dir}/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
+    os.makedirs(output_dir, exist_ok=True)
+    init_logger(output_dir)
+    logger = get_logger()
 
     with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, record_shapes=True) as prof:
         
-        # 2. Cấu hình Quantization 4-bit (Tránh OOM)
+        # 2. Cấu hình Quantization 4-bit
         quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4"
+            load_in_4bit=config['quantization']['enabled'],
+            bnb_4bit_compute_dtype=torch.bfloat16 if config['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
+            bnb_4bit_use_double_quant=config['quantization']['double_quant'],
+            bnb_4bit_quant_type=config['quantization']['type']
         )
 
-        # 3. Load model (KHÔNG GỌI .cuda() ở đây vì bitsandbytes tự động đẩy lên GPU)
+        # 3. Load model
         logger.info(f"Loading model {model_name_or_path} in 4-bit...")
         model = AutoModel.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.bfloat16,
             quantization_config=quantization_config,
             low_cpu_mem_usage=True,
-            trust_remote_code=True
+            trust_remote_code=config['model']['trust_remote_code']
         )
 
-        model.config.use_cache = False  # Tắt cache (bắt buộc khi train)
-        model.gradient_checkpointing_enable()
-        # Dùng AutoTokenizer thay vì Qwen2Tokenizer
+        model.config.use_cache = False
+        if config['training']['gradient_checkpointing']:
+            model.gradient_checkpointing_enable()
+            
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
         model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         
-        # 4. Đóng băng Vision Model (Chỉ dạy ngôn ngữ)
-        model.vision_model.requires_grad_(False)
+        # 4. Đóng băng Vision Model
+        if config['vision']['freeze_encoder']:
+            model.vision_model.requires_grad_(False)
         
-        # 5. Cấu hình LoRA từ file YAML
+        # 5. Cấu hình LoRA
         logger.info("Applying LoRA...")
         peft_config = LoraConfig(
             r=config['model']['lora']['r'],
@@ -236,34 +255,35 @@ if __name__ == "__main__":
         )
         
         model.language_model = get_peft_model(model.language_model, peft_config)
-        print(model.language_model)
         model.language_model.print_trainable_parameters()
         model.train() 
 
-        # 6. Load Dataset bằng hàm build_dataset của bạn
+        # 6. Load Dataset
         logger.info("Building dataset...")
         train_dataset, val_dataset = build_dataset(config)
         
+        collate_fn_wrapper = CollaterFn(tokenizer, model)
+
         train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            collate_fn=CollaterFn(tokenizer),
-            shuffle=True
+            train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
         )
 
         val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            collate_fn=CollaterFn(tokenizer),
-            shuffle=False
+            val_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=False
         )
 
         val_loader_with_shuffle = DataLoader(
-            val_dataset,
-            batch_size=1,
-            collate_fn=CollaterFn(tokenizer),
-            shuffle=True
+            val_dataset, batch_size=1, collate_fn=collate_fn_wrapper, shuffle=True
         )
 
-        # 7. Bắt đầu train!
-        train_model(model, train_loader, val_loader, val_loader_with_shuffle, epochs=epochs)
+        # 7. Bắt đầu train
+        logger.info("STARTING TRAINING...")
+        train_model(
+            model=model, 
+            tokenizer=tokenizer,
+            train_loader=train_loader, 
+            val_loader=val_loader, 
+            val_loader_with_shuffle=val_loader_with_shuffle, 
+            config=config,
+            output_dir=output_dir
+        )
