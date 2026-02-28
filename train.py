@@ -239,7 +239,7 @@ if __name__ == "__main__":
         model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
         
         # 4. Đóng băng Vision Model
-        if config['vision']['freeze_encoder']:
+        if config['model']['vision']['freeze_encoder']:
             model.vision_model.requires_grad_(False)
         
         # 5. Cấu hình LoRA
