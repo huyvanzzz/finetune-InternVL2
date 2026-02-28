@@ -216,12 +216,11 @@ if __name__ == "__main__":
         
         # 2. Cấu hình Quantization 4-bit
         quantization_config = BitsAndBytesConfig(
-            load_in_4bit=config['quantization']['enabled'],
-            bnb_4bit_compute_dtype=torch.bfloat16 if config['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
-            bnb_4bit_use_double_quant=config['quantization']['double_quant'],
-            bnb_4bit_quant_type=config['quantization']['type']
+            load_in_4bit=config['model']['quantization']['enabled'],
+            bnb_4bit_compute_dtype=torch.bfloat16 if config['model']['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
+            bnb_4bit_use_double_quant=config['model']['quantization']['double_quant'],
+            bnb_4bit_quant_type=config['model']['quantization']['type']
         )
-
         # 3. Load model
         logger.info(f"Loading model {model_name_or_path} in 4-bit...")
         model = AutoModel.from_pretrained(
