@@ -298,7 +298,7 @@ if __name__ == "__main__":
         # 5. Cấu hình LoRA
         logger.info("Applying LoRA...")
         model.language_model = prepare_model_for_kbit_training(model.language_model)
-        hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config  "
+        hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config"
         # peft_config = LoraConfig(
         #     r=config['model']['lora']['r'],
         #     lora_alpha=config['model']['lora']['alpha'],
@@ -345,7 +345,7 @@ if __name__ == "__main__":
             val_loader_with_shuffle=val_loader_with_shuffle,
             config=config,
             output_dir=output_dir,
-            resume_dir=None, # Đường dẫn checkpoint để resume (nếu có)
+            resume_dir=None,
             start_epoch=0,
             start_step=5,
         )
