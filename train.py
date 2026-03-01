@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 from torch.profiler import profile, ProfilerActivity
 from tqdm import tqdm
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
 from transformers import BitsAndBytesConfig, AutoModel, AutoTokenizer, get_cosine_schedule_with_warmup
 from logutil import init_logger, get_logger
 import random
@@ -298,18 +298,24 @@ if __name__ == "__main__":
         # 5. Cấu hình LoRA
         logger.info("Applying LoRA...")
         model.language_model = prepare_model_for_kbit_training(model.language_model)
-        peft_config = LoraConfig(
-            r=config['model']['lora']['r'],
-            lora_alpha=config['model']['lora']['alpha'],
-            target_modules=config['model']['lora']['target_modules'],
-            lora_dropout=config['model']['lora']['dropout'],
-            bias=config['model']['lora']['bias'],
-            task_type=config['model']['lora']['task_type']
-        )
+        hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config  "
+        # peft_config = LoraConfig(
+        #     r=config['model']['lora']['r'],
+        #     lora_alpha=config['model']['lora']['alpha'],
+        #     target_modules=config['model']['lora']['target_modules'],
+        #     lora_dropout=config['model']['lora']['dropout'],
+        #     bias=config['model']['lora']['bias'],
+        #     task_type=config['model']['lora']['task_type']
+        # )
         
-        model.language_model = get_peft_model(model.language_model, peft_config)
+        model.language_model = PeftModel.from_pretrained(
+            model.language_model,
+            hf_repo_id,
+            is_trainable=True # BẮT BUỘC ĐỂ TRUE nếu bạn muốn train tiếp. Nếu chỉ chạy test thì để False.
+        )
+
         model.language_model.print_trainable_parameters()
-        model.train() 
+        model.train()
 
         # 6. Load Dataset
         logger.info("Building dataset...")
@@ -332,14 +338,14 @@ if __name__ == "__main__":
         # 7. Bắt đầu train
         logger.info("STARTING TRAINING...")
         train_model(
-            model=model, 
+            model=model,
             tokenizer=tokenizer,
             train_loader=train_loader,
             val_loader=val_loader,
-            val_loader_with_shuffle=val_loader_with_shuffle, 
+            val_loader_with_shuffle=val_loader_with_shuffle,
             config=config,
             output_dir=output_dir,
-            # resume_dir="./outputs/epoch_2_step_500/", 
-            # start_epoch=1,
-            # start_step=500,
+            resume_dir=None, # Đường dẫn checkpoint để resume (nếu có)
+            start_epoch=0,
+            start_step=5,
         )
