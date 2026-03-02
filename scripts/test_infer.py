@@ -126,15 +126,15 @@ def main():
     )
 
     test_dataset = WADDatasetForInternVL(
-        metadata_dataset=dataset_dict["test"],
+        metadata_dataset=dataset_dict,
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
         split='test',
     )
     
     test_loader = DataLoader(
-        test_dataset, 
-        batch_size=1, 
+        test_dataset,
+        batch_size=1,
         collate_fn=TestCollaterFn(tokenizer, model), 
         shuffle=False
     )
