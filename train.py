@@ -12,6 +12,7 @@ from transformers import BitsAndBytesConfig, AutoModel, AutoTokenizer, get_cosin
 from logutil import init_logger, get_logger
 import random
 import numpy as np
+from torch.amp import autocast  # ← THÊM DÒNG NÀY
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -104,7 +105,8 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
-                response = model.chat(tokenizer, pixel_values, question, generation_config)
+                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                    response = model.chat(tokenizer, pixel_values, question, generation_config)
                 logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
             total_test_batches += 1
             if total_test_batches == 2:
