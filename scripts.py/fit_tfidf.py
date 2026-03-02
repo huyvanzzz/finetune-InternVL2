@@ -2,6 +2,7 @@ import argparse
 import yaml
 import sys
 import json
+sys.path.append('.')
 
 from .metrics import VLMMetrics
 from preprocessing import map_metadata_to_ground_truth
