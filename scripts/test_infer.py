@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader
 from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from datasets import load_dataset
-
+import sys
+sys.path.append('.')
 # Import class Metrics từ file metrics.py
 from scripts.metrics import VLMMetrics
 
