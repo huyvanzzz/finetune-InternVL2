@@ -8,7 +8,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from peft import PeftModel
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, logger
+from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from datasets import load_dataset
 import sys
 sys.path.append('.')
@@ -81,7 +81,6 @@ def main():
         bnb_4bit_quant_type=config['model']['quantization']['type']
     )
     # 3. Load model
-    logger.info(f"Loading model {model_name_or_path} in 4-bit...")
     model = AutoModel.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.bfloat16,
