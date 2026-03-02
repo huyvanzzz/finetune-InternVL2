@@ -100,7 +100,6 @@ def main():
             model.language_model, 
             args.checkpoint, 
             is_trainable=False,
-            token=True
         )
         print("✓ LoRA Adapter loaded successfully.")
     else:
