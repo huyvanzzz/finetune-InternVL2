@@ -116,13 +116,13 @@ def main():
         data_file = "test_alter.json" 
     elif args.split == "test_QA":
         data_file = "test_QA.json"
-    else:
-        data_file = "val.json" # Fallback nếu gọi split khác
         
     print(f"Loading metadata from {data_file}...")
     dataset_dict = load_dataset(
-        "json", # Dùng "json" nếu load file local trực tiếp
-        data_files={"test": data_file}
+        config['data']['name'],
+        data_files={
+            "test": data_file
+        }
     )
 
     image_size = tuple(config['model']['vision']['image_size']) if 'image_size' in config['model']['vision'] else (448, 448)
