@@ -101,8 +101,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
         for batch in tqdm(val_loader_with_shuffle):
             _, _, _, _, samples = batch 
             for sample in samples:
-                vit_dtype = next(model.vision_model.parameters()).dtype
-                pixel_values = sample['pixel_values'].to(vit_dtype).cuda()
+                pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
@@ -294,10 +293,13 @@ if __name__ == "__main__":
     if config['model']['vision']['freeze_encoder']:
         model.vision_model.requires_grad_(False)
     
-    model.language_model.get_input_embeddings().to(torch.bfloat16)
     # 5. Cấu hình LoRA
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
+
+    if hasattr(model.language_model, "get_input_embeddings"):
+        model.language_model.get_input_embeddings().to(torch.bfloat16)
+
     # hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config"
     peft_config = LoraConfig(
         r=config['model']['lora']['r'],
