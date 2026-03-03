@@ -19,10 +19,7 @@ class POLMData:
             f"[OBJ] {self.object_type}, "
             f"({self.bbox[0]:.2f}, {self.bbox[1]:.2f}, "
             f"{self.bbox[2]:.2f}, {self.bbox[3]:.2f}), "
-            f"pos={self.relative_position}, "
-            f"dist={self.distance_zone:.2f}, "
-            f"approaching={'yes' if self.coming_to_user else 'no'}, "
-            f"speed={self.speed:.2f}."
+            f"pos={self.relative_position}."
         )
 
 @dataclass
