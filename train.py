@@ -12,7 +12,6 @@ from transformers import BitsAndBytesConfig, AutoModel, AutoTokenizer, get_cosin
 from logutil import init_logger, get_logger
 import random
 import numpy as np
-from torch.amp import autocast  # ← THÊM DÒNG NÀY
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -95,22 +94,22 @@ class CollaterFn:
         attention_mask_tensor = maybe_pad(attention_mask_batch, 0)
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, torch.cat(pixel_values_batch), samples_batch
 
-def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
-    model.eval()
-    with torch.no_grad():
-        total_test_batches = 0
-        for batch in tqdm(val_loader_with_shuffle):
-            _, _, _, _, samples = batch 
-            for sample in samples:
-                pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
-                generation_config = dict(max_new_tokens=512, do_sample=False)
-                question = f"{sample['question']}"
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                    response = model.chat(tokenizer, pixel_values, question, generation_config)
-                logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
-            total_test_batches += 1
-            if total_test_batches == 2:
-                break
+# def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
+#     model.eval()
+#     with torch.no_grad():
+#         total_test_batches = 0
+#         for batch in tqdm(val_loader_with_shuffle):
+#             _, _, _, _, samples = batch 
+#             for sample in samples:
+#                 pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
+#                 generation_config = dict(max_new_tokens=512, do_sample=False)
+#                 question = f"{sample['question']}"
+#                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+#                     response = model.chat(tokenizer, pixel_values, question, generation_config)
+#                 logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
+#             total_test_batches += 1
+#             if total_test_batches == 2:
+#                 break
 
 def eval_model(model, val_loader, step, epoch, epochs):
     model.eval()

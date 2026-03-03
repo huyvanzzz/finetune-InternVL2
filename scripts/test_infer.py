@@ -113,7 +113,7 @@ def main():
     frame_index, bbox_by_folder = prepare_auxiliary_data(config)
     
     if args.split == "test_alter":
-        data_file = "test_alter.json" 
+        data_file = "test_alter.json"
     elif args.split == "test_QA":
         data_file = "test_QA.json"
         
