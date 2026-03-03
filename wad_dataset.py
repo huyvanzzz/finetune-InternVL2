@@ -59,11 +59,8 @@ class WADDatasetForInternVL(Dataset):
                     polm = POLMData(
                         object_type=bbox['label'],
                         bbox=bbox['bbox'],
-                        relative_position = bbox.get('relative_position', "unknown"),
-                        distance_zone = bbox.get('distance_zone', 'unknown'),
-                        coming_to_user = bbox.get('coming_to_user', False),
-                        speed = bbox.get('speed', 0.0),
-                        )
+                        confidence=bbox['confidence'],
+                    )
                     polm_list.append(polm)
         return polm_list
 
@@ -166,10 +163,6 @@ def build_dataset(config: Dict):
             'label': bbox_entry['label'],
             'confidence': bbox_entry['probs'],
             'bbox': bbox_entry['boxs'],
-            'relative_position': bbox_entry.get('relative_position', "unknown"),
-            'distance_zone': bbox_entry.get('distance_zone', 'unknown'),
-            'coming_to_user': bbox_entry.get('coming_to_user', False),
-            'speed': bbox_entry.get('speed', 0.0),
         })
     
     # Load frame index

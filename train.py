@@ -94,21 +94,22 @@ class CollaterFn:
         attention_mask_tensor = maybe_pad(attention_mask_batch, 0)
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, torch.cat(pixel_values_batch), samples_batch
 
-def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
-    model.eval()
-    with torch.no_grad():
-        total_test_batches = 0
-        for batch in tqdm(val_loader_with_shuffle):
-            _, _, _, _, samples = batch 
-            for sample in samples:
-                pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
-                generation_config = dict(max_new_tokens=512, do_sample=False)
-                question = f"{sample['question']}"
-                response = model.chat(tokenizer, pixel_values, question, generation_config)
-                logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
-            total_test_batches += 1
-            if total_test_batches == 2:
-                break
+# def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
+#     model.eval()
+#     with torch.no_grad():
+#         total_test_batches = 0
+#         for batch in tqdm(val_loader_with_shuffle):
+#             _, _, _, _, samples = batch 
+#             for sample in samples:
+#                 pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
+#                 generation_config = dict(max_new_tokens=512, do_sample=False)
+#                 question = f"{sample['question']}"
+#                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+#                     response = model.chat(tokenizer, pixel_values, question, generation_config)
+#                 logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
+#             total_test_batches += 1
+#             if total_test_batches == 2:
+#                 break
 
 def eval_model(model, val_loader, step, epoch, epochs):
     model.eval()
@@ -234,7 +235,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             
             if i % config['training']['eval_steps'] == 0:
                 eval_model(model, val_loader, i, epoch, epochs)
-                test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
+                # test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
                 model.train()
                 
             if i % config['training']['save_steps'] == 0: 
@@ -301,6 +302,9 @@ if __name__ == "__main__":
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
     # hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config"
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
     peft_config = LoraConfig(
         r=config['model']['lora']['r'],
         lora_alpha=config['model']['lora']['alpha'],
