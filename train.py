@@ -235,7 +235,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             
             if i % config['training']['eval_steps'] == 0:
                 eval_model(model, val_loader, i, epoch, epochs)
-                test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
+                # test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
                 model.train()
                 
             if i % config['training']['save_steps'] == 0: 
