@@ -297,6 +297,10 @@ if __name__ == "__main__":
     # 5. Cấu hình LoRA
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
+
+    if hasattr(model.language_model, "get_input_embeddings"):
+        model.language_model.get_input_embeddings().to(torch.bfloat16)
+
     # hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config"
     for name, param in model.named_parameters():
         if "lora_" in name:
