@@ -106,10 +106,10 @@ Follow Chain-of-Thought reasoning:
             if has_question:
                 text_content += f"\n\nQuestion: {sample['QA']['Q']}"
                 text_content += """\n\nFormat response:
-<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
+<answer>{"location": "", "weather": "", "traffic": "", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
             else:
                 text_content += """\n\nFormat response:
-<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
+<answer>{"location": "", "weather": "", "traffic": "", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
 
             # Chốt lại: Gắn thẻ <image>\n lên đầu để mô hình biết vị trí nhét ảnh
             question = f"<image>\n{text_content}"
