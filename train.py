@@ -293,6 +293,7 @@ if __name__ == "__main__":
     if config['model']['vision']['freeze_encoder']:
         model.vision_model.requires_grad_(False)
     
+    model.language_model.get_input_embeddings().to(torch.bfloat16)
     # 5. Cấu hình LoRA
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
