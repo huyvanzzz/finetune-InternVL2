@@ -298,6 +298,9 @@ if __name__ == "__main__":
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
     # hf_repo_id = "huyvanzzz/Internvl2.5-2b-lora-config"
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
     peft_config = LoraConfig(
         r=config['model']['lora']['r'],
         lora_alpha=config['model']['lora']['alpha'],
