@@ -322,7 +322,7 @@ class InternVLChatModel(PreTrainedModel):
             input_ids = input_ids.reshape(B * N)
             selected = (input_ids == self.img_context_token_id)
             assert selected.sum() != 0
-            input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device).to(input_embeds.dtype)
+            input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
             input_embeds = input_embeds.reshape(B, N, C)
             # (Pdb++) self.img_context_token_id
             # 151648

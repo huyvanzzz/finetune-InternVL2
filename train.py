@@ -101,7 +101,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
         for batch in tqdm(val_loader_with_shuffle):
             _, _, _, _, samples = batch 
             for sample in samples:
-                pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
+                pixel_values = sample['pixel_values'].to(torch.float32).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
