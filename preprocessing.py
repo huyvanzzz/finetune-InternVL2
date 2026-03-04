@@ -13,6 +13,7 @@ class POLMData:
     distance_zone: str
     coming_to_user: bool
     speed: float
+    danger_score: float
     def to_text(self) -> str:
         return (
             f"[OBJ] {self.object_type}, "
