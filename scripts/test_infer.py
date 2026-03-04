@@ -165,7 +165,6 @@ def main():
                 num_beams=3,
                 do_sample=False,
                 repetition_penalty=1.3,
-                use_cache=True,
                 early_stopping=True,
             )
             
