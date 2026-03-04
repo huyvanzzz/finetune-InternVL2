@@ -60,7 +60,12 @@ def prepare_auxiliary_data(config):
         bbox_by_folder[folder_id][frame_id].append({
             'label': bbox_entry['label'],
             'confidence': bbox_entry['probs'],
-            'bbox': bbox_entry['boxs']
+            'bbox': bbox_entry['boxs'],
+            'relative_position': bbox_entry.get('relative_position', "unknown"),
+            'distance_zone': bbox_entry.get('distance_zone', 'unknown'),
+            'coming_to_user': bbox_entry.get('coming_to_user', False),
+            'speed': bbox_entry.get('speed', 0.0),
+            'danger_score': bbox_entry.get('danger_score', 0.0)
         })
     return frame_index, bbox_by_folder
 
