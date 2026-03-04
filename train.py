@@ -302,7 +302,7 @@ if __name__ == "__main__":
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
-    hf_repo_id = "huyvanzzz/Internvl2.5-lora"
+    hf_repo_id = "huyvanzzz/Internvl2.5-lora_config"
     # peft_config = LoraConfig(
     #     r=config['model']['lora']['r'],
     #     lora_alpha=config['model']['lora']['alpha'],
