@@ -160,7 +160,14 @@ def main():
             question = str(sample['question'])
             ground_truth = str(sample['answer'])
             
-            generation_config = dict(max_new_tokens=512, do_sample=False)
+            generation_config = dict(
+                max_new_tokens=512,
+                num_beams=3,
+                do_sample=False,
+                repetition_penalty=1.3,
+                use_cache=True,
+                early_stopping=True,
+            )
             
             response = model.chat(tokenizer, pixel_values, question, generation_config)
             
