@@ -6,7 +6,7 @@ from typing import List, Dict
 import random
 from sklearn.model_selection import train_test_split
 
-from preprocessing import POLMData, map_metadata_to_ground_truth
+from preprocessing import map_metadata_to_ground_truth
 # BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
 from data import process_image
 
@@ -48,30 +48,45 @@ class WADDatasetForInternVL(Dataset):
                     frames_dict[frame_id] = img
         return [frames_dict[fid] for fid in frame_ids]
 
-    def _load_bboxes(self, frame_path: str, frame_ids: List[int]) -> List[POLMData]:
-        polm_list = []
-        if frame_path not in self.bbox_by_folder:
-            return polm_list
-        for frame_id in frame_ids:
-            if frame_id in self.bbox_by_folder[frame_path]:
-                bboxes = self.bbox_by_folder[frame_path][frame_id]
-                for bbox in bboxes:
-                    polm = POLMData(
-                        object_type=bbox['label'],
-                        bbox=bbox['bbox'],
-                        relative_position = bbox.get('relative_position', "unknown"),
-                        distance_zone = bbox.get('distance_zone', 'unknown'),
-                        coming_to_user = bbox.get('coming_to_user', False),
-                        speed = bbox.get('speed', 0.0),
-                        danger_score= bbox.get('danger_score', 0.0),
-                        )
-                    polm_list.append(polm)
-                polm_list.sort(key=lambda x: x.distance_zone, reverse=True)
-        return polm_list[:30]
+    # def _load_bboxes(self, frame_path: str, frame_ids: List[int]) -> List[POLMData]:
+    #     polm_list = []
+    #     if frame_path not in self.bbox_by_folder:
+    #         return polm_list
+    #     for frame_id in frame_ids:
+    #         if frame_id in self.bbox_by_folder[frame_path]:
+    #             bboxes = self.bbox_by_folder[frame_path][frame_id]
+    #             for bbox in bboxes:
+    #                 polm = POLMData(
+    #                     object_type=bbox['label'],
+    #                     bbox=bbox['bbox'],
+    #                     relative_position = bbox.get('relative_position', "unknown"),
+    #                     distance_zone = bbox.get('distance_zone', 'unknown'),
+    #                     coming_to_user = bbox.get('coming_to_user', False),
+    #                     speed = bbox.get('speed', 0.0),
+    #                     danger_score= bbox.get('danger_score', 0.0),
+    #                     )
+    #                 polm_list.append(polm)
+    #             polm_list.sort(key=lambda x: x.distance_zone, reverse=True)
+    #     return polm_list[:15]
 
-    def _select_frames_safe(self, frame_path: str, num_frames: int = 1) -> List[int]:
+    def _select_frames_safe(self, frame_path: str) -> List[int]:
         available_frames = sorted(self.frame_index[frame_path].keys())
-        return [available_frames[-1]]
+        
+        # Ý bạn là lấy frame ở vị trí index 4, 6, 8 (tức là frame thứ 5, 7, 9)
+        # Nếu ý bạn là frame thứ 4, 6, 8 đếm từ 1 thì đổi thành [3, 5, 7] nhé.
+        target_indices = [4, 6, 8]
+        
+        selected_frames = []
+        for idx in target_indices:
+            # Kiểm tra xem danh sách có đủ dài để lấy index này không
+            if idx < len(available_frames):
+                selected_frames.append(available_frames[idx])
+            else:
+                # Nếu không đủ frame (VD: video chỉ có 5 frames nhưng đòi lấy index 8)
+                # -> Lấy frame cuối cùng có sẵn để bù vào cho đủ 3 tensor
+                selected_frames.append(available_frames[-1])
+                
+        return selected_frames
 
     # ĐÂY LÀ PHẦN THAY ĐỔI QUAN TRỌNG NHẤT
     def __getitem__(self, idx):
@@ -80,20 +95,19 @@ class WADDatasetForInternVL(Dataset):
             frame_path = sample['frame_path']
             
             # 1. Load Ảnh
-            frame_ids = self._select_frames_safe(frame_path, num_frames=1)
+            frame_ids = self._select_frames_safe(frame_path)
             frames = self._load_frames(frame_path, frame_ids)
             image = frames[0] # Lấy 1 ảnh PIL
             
             # 2. Xử lý ảnh bằng hàm của tác giả zhangfaen (Tự cắt tile, tự tạo tensor)
-            pixel_values = process_image(image) 
+            pixel_values = process_image(image)
             
             # 3. Tạo Text Prompt
-            polm_list = self._load_bboxes(frame_path, frame_ids)
-            polm_text = "\n".join([f"- {polm.to_text()}" for polm in polm_list])
+            # polm_list = self._load_bboxes(frame_path, frame_ids)
+            # polm_text = "\n".join([f"- {polm.to_text()}" for polm in polm_list])
             
             # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
-            text_content = f"""Detected objects:
-{polm_text}
+            text_content = f"""
 
 Analyze: location, weather, traffic, scene → then give instruction.
 
@@ -114,7 +128,7 @@ Follow Chain-of-Thought reasoning:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
 
             # Chốt lại: Gắn thẻ <image>\n lên đầu để mô hình biết vị trí nhét ảnh
-            question = f"<image>\n{text_content}"
+            question = f"<image><image><image>\n{text_content}"
             
             # 4. Tạo Answer (Ground Truth)
             ground_truth_dict = map_metadata_to_ground_truth(sample)
@@ -155,7 +169,7 @@ def build_dataset(config: Dict):
     print("Loading bboxes...")
     bbox_dataset = load_dataset(
         config['data']['name'],
-        data_files="all_bboxes.jsonl",
+        data_files="all_bboxes_1.jsonl",
         split="train"
     )
     
