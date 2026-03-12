@@ -74,6 +74,7 @@ class CollaterFn:
             query = template.get_prompt()
 
             num_patches_list = [pv.shape[0] for pv in pixel_values]
+            print(f"\n[CHECK] Số ảnh nhận được: {len(num_patches_list)} | Số patch từng ảnh: {num_patches_list}")
             for num_patches in num_patches_list:
                 image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
                 query = query.replace('<image>', image_tokens, 1)
@@ -90,6 +91,7 @@ class CollaterFn:
             input_ids_batch.append(input_ids)
             attention_mask_batch.append(attention_mask)
             pixel_values_batch.append(torch.cat(pixel_values, dim=0))
+            print(f"\n[CHECK] Shape của pixel_values vào model: {pixel_values_batch.shape}")
 
         input_ids_tensor = maybe_pad(input_ids_batch, eot_token_id)
         label_ids_tensor = maybe_pad(label_ids_batch, -100)
