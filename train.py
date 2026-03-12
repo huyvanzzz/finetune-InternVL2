@@ -73,7 +73,7 @@ class CollaterFn:
             template.append_message(template.roles[1], None)
             query = template.get_prompt()
 
-            num_patches_list = [pixel_values.shape[0]]
+            num_patches_list = [pv.shape[0] for pv in pixel_values]
             for num_patches in num_patches_list:
                 image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
                 query = query.replace('<image>', image_tokens, 1)
@@ -89,7 +89,7 @@ class CollaterFn:
             label_ids_batch.append(label_ids)
             input_ids_batch.append(input_ids)
             attention_mask_batch.append(attention_mask)
-            pixel_values_batch.append(pixel_values)
+            pixel_values_batch.append(torch.cat(pixel_values, dim=0))
 
         input_ids_tensor = maybe_pad(input_ids_batch, eot_token_id)
         label_ids_tensor = maybe_pad(label_ids_batch, -100)
@@ -103,7 +103,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
         for batch in tqdm(val_loader_with_shuffle):
             _, _, _, _, samples = batch 
             for sample in samples:
-                pixel_values = sample['pixel_values'].to(torch.bfloat16).cuda()
+                pixel_values = torch.cat(sample['pixel_values'], dim=0).to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
@@ -302,28 +302,28 @@ if __name__ == "__main__":
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
-    # hf_repo_id = "huyvanzzz/internvl2.5_config"
-    peft_config = LoraConfig(
-        r=config['model']['lora']['r'],
-        lora_alpha=config['model']['lora']['alpha'],
-        target_modules=config['model']['lora']['target_modules'],
-        lora_dropout=config['model']['lora']['dropout'],
-        bias=config['model']['lora']['bias'],
-        task_type=config['model']['lora']['task_type']
-    )
-    
-    model.language_model = get_peft_model(model.language_model, peft_config)
-    model.language_model.print_trainable_parameters()
-    model.train()
-    
-    # model.language_model = PeftModel.from_pretrained(
-    #     model.language_model,
-    #     hf_repo_id,
-    #     is_trainable=True # BẮT BUỘC ĐỂ TRUE nếu bạn muốn train tiếp. Nếu chỉ chạy test thì để False.
+    hf_repo_id = "huyvanzzz/internvl2.5_config"
+    # peft_config = LoraConfig(
+    #     r=config['model']['lora']['r'],
+    #     lora_alpha=config['model']['lora']['alpha'],
+    #     target_modules=config['model']['lora']['target_modules'],
+    #     lora_dropout=config['model']['lora']['dropout'],
+    #     bias=config['model']['lora']['bias'],
+    #     task_type=config['model']['lora']['task_type']
     # )
-
+    
+    # model.language_model = get_peft_model(model.language_model, peft_config)
     # model.language_model.print_trainable_parameters()
     # model.train()
+    
+    model.language_model = PeftModel.from_pretrained(
+        model.language_model,
+        hf_repo_id,
+        is_trainable=True # BẮT BUỘC ĐỂ TRUE nếu bạn muốn train tiếp. Nếu chỉ chạy test thì để False.
+    )
+
+    model.language_model.print_trainable_parameters()
+    model.train()
 
     # 6. Load Dataset
     logger.info("Building dataset...")
@@ -353,7 +353,7 @@ if __name__ == "__main__":
         val_loader_with_shuffle=val_loader_with_shuffle,
         config=config,
         output_dir=output_dir,
-        # resume_dir=None,
-        # start_epoch=0,
-        # start_step=8000,
+        resume_dir=None,
+        start_epoch=0,
+        start_step=8000,
     )

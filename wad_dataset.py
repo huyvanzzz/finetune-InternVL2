@@ -5,7 +5,7 @@ import io
 from typing import List, Dict
 import random
 from sklearn.model_selection import train_test_split
-
+import torch
 from preprocessing import map_metadata_to_ground_truth
 # BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
 from data import process_image
@@ -97,10 +97,9 @@ class WADDatasetForInternVL(Dataset):
             # 1. Load Ảnh
             frame_ids = self._select_frames_safe(frame_path)
             frames = self._load_frames(frame_path, frame_ids)
-            image = frames[0] # Lấy 1 ảnh PIL
             
             # 2. Xử lý ảnh bằng hàm của tác giả zhangfaen (Tự cắt tile, tự tạo tensor)
-            pixel_values = process_image(image)
+            pixel_values = [process_image(img) for img in frames]
             
             # 3. Tạo Text Prompt
             # polm_list = self._load_bboxes(frame_path, frame_ids)
@@ -140,7 +139,7 @@ Follow Chain-of-Thought reasoning:
                 'answer': answer, 
                 'pixel_values': pixel_values, 
                 'questionId': str(idx),
-                'image': image
+                'image': frames
             }
 
         except Exception as e:
