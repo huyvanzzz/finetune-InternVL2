@@ -302,28 +302,28 @@ if __name__ == "__main__":
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
-    hf_repo_id = "huyvanzzz/internvl2.5_config"
-    # peft_config = LoraConfig(
-    #     r=config['model']['lora']['r'],
-    #     lora_alpha=config['model']['lora']['alpha'],
-    #     target_modules=config['model']['lora']['target_modules'],
-    #     lora_dropout=config['model']['lora']['dropout'],
-    #     bias=config['model']['lora']['bias'],
-    #     task_type=config['model']['lora']['task_type']
-    # )
-    
-    # model.language_model = get_peft_model(model.language_model, peft_config)
-    # model.language_model.print_trainable_parameters()
-    # model.train()
-    
-    model.language_model = PeftModel.from_pretrained(
-        model.language_model,
-        hf_repo_id,
-        is_trainable=True # BẮT BUỘC ĐỂ TRUE nếu bạn muốn train tiếp. Nếu chỉ chạy test thì để False.
+    # hf_repo_id = "huyvanzzz/internvl2.5_config"
+    peft_config = LoraConfig(
+        r=config['model']['lora']['r'],
+        lora_alpha=config['model']['lora']['alpha'],
+        target_modules=config['model']['lora']['target_modules'],
+        lora_dropout=config['model']['lora']['dropout'],
+        bias=config['model']['lora']['bias'],
+        task_type=config['model']['lora']['task_type']
     )
-
+    
+    model.language_model = get_peft_model(model.language_model, peft_config)
     model.language_model.print_trainable_parameters()
     model.train()
+    
+    # model.language_model = PeftModel.from_pretrained(
+    #     model.language_model,
+    #     hf_repo_id,
+    #     is_trainable=True # BẮT BUỘC ĐỂ TRUE nếu bạn muốn train tiếp. Nếu chỉ chạy test thì để False.
+    # )
+
+    # model.language_model.print_trainable_parameters()
+    # model.train()
 
     # 6. Load Dataset
     logger.info("Building dataset...")
@@ -353,7 +353,7 @@ if __name__ == "__main__":
         val_loader_with_shuffle=val_loader_with_shuffle,
         config=config,
         output_dir=output_dir,
-        resume_dir=None,
-        start_epoch=0,
-        start_step=8000,
+        # resume_dir=None,
+        # start_epoch=0,
+        # start_step=8000,
     )
