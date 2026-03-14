@@ -355,5 +355,5 @@ if __name__ == "__main__":
         output_dir=output_dir,
         resume_dir=None,
         start_epoch=1,
-        start_step=1500,
+        start_step=3000,
     )
