@@ -130,6 +130,20 @@ def main():
         }
     )
 
+    total_samples = len(dataset_dict["test"])
+    if total_samples > 100:
+        
+        # Hàm này của Hugging Face cực thông minh, test_size=100 là bốc đúng 100 cái
+        split_ds = dataset_dict["test"].train_test_split(
+            test_size=100,
+            stratify_by_column="danger_level",
+            seed=42
+        )
+        
+        # Ghi đè tập test cũ bằng tập test 100 mẫu vừa chia
+        dataset_dict["test"] = split_ds["test"]
+        print(f"{len(dataset_dict['test'])}")
+
     test_dataset = WADDatasetForInternVL(
         metadata_dataset=dataset_dict,
         frame_index=frame_index,
