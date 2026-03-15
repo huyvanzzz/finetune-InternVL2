@@ -227,17 +227,18 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 
                 avg_loss = accumulated_loss_for_log / accum_steps
-                logger.info(f"Step {i//accum_steps} | Avg Loss (last {accum_steps} batches): {avg_loss:.4f}")
+                if (i // accum_steps) % 50 == 0:
+                    logger.info(f"Step {i//accum_steps} | Avg Loss: {avg_loss:.4f}")
                 accumulated_loss_for_log = 0.0 
                 
                 optimizer.step()
                 lr_scheduler.step() 
                 optimizer.zero_grad()
             
-            if i % config['training']['eval_steps'] == 0:
-                eval_model(model, val_loader, i, epoch, epochs)
-                test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
-                model.train()
+            # if i % config['training']['eval_steps'] == 0:
+            #     eval_model(model, val_loader, i, epoch, epochs)
+            #     test_model(model, tokenizer, val_loader_with_shuffle, shuffle=True)
+            #     model.train()
                 
             if i % config['training']['save_steps'] == 0: 
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
