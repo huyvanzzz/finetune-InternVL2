@@ -176,7 +176,7 @@ def main():
     with torch.no_grad():
         for i, batch in enumerate(tqdm(test_loader, desc="Testing")):
             sample = batch[0]
-            pixel_values = torch.tensor(sample['pixel_values']).to(torch.bfloat16).cuda()
+            pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
             question = str(sample['question'])
             ground_truth = str(sample['answer'])
             
