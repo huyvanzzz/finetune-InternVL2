@@ -355,6 +355,6 @@ if __name__ == "__main__":
         config=config,
         output_dir=output_dir,
         resume_dir=None,
-        start_epoch=0,
-        start_step=8000,
+        start_epoch=1,
+        start_step=500,
     )
