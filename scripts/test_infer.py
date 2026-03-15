@@ -47,11 +47,11 @@ def prepare_auxiliary_data(config):
     else:
         raise FileNotFoundError(f"Frame index not found at {index_file}.")
 
-    bbox_file = "all_bboxes.jsonl"
+    bbox_file = "all_bboxes_1.jsonl"
     if os.path.exists(bbox_file):
         bbox_dataset = load_dataset("json", data_files=bbox_file, split="train")
     else:
-        bbox_dataset = load_dataset(config['data']['name'], data_files="all_bboxes.jsonl", split="train")
+        bbox_dataset = load_dataset(config['data']['name'], data_files="all_bboxes_1.jsonl", split="train")
 
     bbox_by_folder = defaultdict(lambda: defaultdict(list))
     for bbox_entry in bbox_dataset:
