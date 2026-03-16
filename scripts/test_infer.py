@@ -131,7 +131,7 @@ def main():
     )
 
     total_samples = len(dataset_dict["test"])
-    if total_samples > 100:
+    if total_samples > 100 and args.split == "test_alter":
         
         dataset_dict["test"] = dataset_dict["test"].add_column("label_copy", dataset_dict["test"]["danger_level"])
 
