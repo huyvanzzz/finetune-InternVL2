@@ -74,6 +74,8 @@ class CollaterFn:
             query = template.get_prompt()
 
             num_patches_list = [pv.shape[0] for pv in pixel_values]
+            total_image_tokens_in_sample = sum(num_patches_list) * self.model.num_image_token
+            print(f"\n[INFO] Sample này đưa vào {total_image_tokens_in_sample} image tokens.")
             for num_patches in num_patches_list:
                 image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
                 query = query.replace('<image>', image_tokens, 1)
