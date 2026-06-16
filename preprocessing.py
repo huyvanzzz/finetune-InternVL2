@@ -43,6 +43,23 @@ class GroundTruthData:
             'scene': self.scene,
             'instruction': self.instruction
         }, ensure_ascii=False)
+
+    def to_direct_text(self) -> str:
+        """Return the final target text without JSON formatting."""
+        return (self.instruction or "").strip()
+
+
+def get_response_format(config: Dict = None) -> str:
+    if not config:
+        return "structured_json"
+    return config.get("data", {}).get("response_format", "structured_json")
+
+
+def format_ground_truth(metadata: Dict, response_format: str = "structured_json") -> str:
+    ground_truth = map_metadata_to_ground_truth(metadata)
+    if response_format == "direct_text":
+        return ground_truth.to_direct_text()
+    return f"<answer>{ground_truth.to_json()}</answer>"
     
 def map_metadata_to_ground_truth(metadata: Dict) -> GroundTruthData:
     """Map WAD metadata to ground truth format"""

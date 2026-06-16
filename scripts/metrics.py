@@ -36,6 +36,8 @@ class VLMMetrics:
 
     def _extract_field(self, json_str: str, key: str = "instruction") -> str:
         """Parse JSON để lấy trường dữ liệu cụ thể"""
+        if key in (None, "", "raw_text"):
+            return self._clean_text(json_str)
         try:
             clean_str = self._clean_text(json_str)
             data = json.loads(clean_str)
