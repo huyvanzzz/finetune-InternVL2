@@ -20,6 +20,14 @@ from preprocessing import get_response_format
 from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
+SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+def log_runtime_prompt_state(model, stage):
+    print(
+        f"[PROMPT STATE][{stage}] template={getattr(model, 'template', 'unknown')} | "
+        f"system_message={repr(getattr(model, 'system_message', ''))}"
+    )
 
 class TestCollaterFn:
     def __init__(self, tokenizer, model) -> None:
@@ -99,6 +107,9 @@ def main():
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+    log_runtime_prompt_state(model, "after_load_before_override")
+    model.system_message = SYSTEM_MESSAGE
+    log_runtime_prompt_state(model, "after_override")
     if qformer_enabled(config):
         attach_qformer_bridge(model, config)
     model.eval()

@@ -49,6 +49,16 @@ from qformer_bridge import (
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
+SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+def log_runtime_prompt_state(model, stage):
+    logger.info(
+        "[PROMPT STATE][%s] template=%s | system_message=%s",
+        stage,
+        getattr(model, "template", "unknown"),
+        repr(getattr(model, "system_message", "")),
+    )
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -378,6 +388,9 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+    log_runtime_prompt_state(model, "after_load_before_override")
+    model.system_message = SYSTEM_MESSAGE
+    log_runtime_prompt_state(model, "after_override")
 
     if config["model"]["vision"]["freeze_encoder"]:
         model.vision_model.requires_grad_(False)

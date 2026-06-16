@@ -110,10 +110,7 @@ class WADDatasetForInternVL(Dataset):
             
             # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
             if self.response_format == 'direct_text':
-                text_content = """
-
-Analyze the scene and produce the final response only.
-"""
+                text_content = "Describe the scene for a visually impaired user based on the final frame."
             else:
                 text_content = """
 
@@ -128,15 +125,24 @@ Follow Chain-of-Thought reasoning:
             has_question = sample.get('QA') and sample['QA'].get('Q')
             
             if has_question:
-                text_content += f"\n\nQuestion: {sample['QA']['Q']}"
                 if self.response_format == 'direct_text':
-                    text_content += "\n\nAnswer the question directly based on the scene. Output only the answer text."
+                    text_content += (
+                        "\nFocus on obstacles, nearby people or vehicles, free walking space, direction, and safety."
+                        f"\nQuestion: {sample['QA']['Q']}"
+                    )
+                else:
+                    text_content += f"\n\nQuestion: {sample['QA']['Q']}"
+                if self.response_format == 'direct_text':
+                    text_content += "\nAnswer the question directly in natural language."
                 else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
             else:
                 if self.response_format == 'direct_text':
-                    text_content += "\n\nGive the alert or guidance that should be spoken to assist a visually impaired user. Output only that final alert or guidance text."
+                    text_content += (
+                        "\nFocus on immediate obstacles, safe direction, and what action the user should take."
+                        "\nProvide only the final spoken guidance in natural language."
+                    )
                 else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
