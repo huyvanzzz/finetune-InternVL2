@@ -57,6 +57,7 @@ class CollaterFn:
     def __init__(self, tokenizer, model) -> None:
         self.tokenizer = tokenizer
         self.model = model # Truyền model vào thay vì dùng biến global
+        self.debug_counter = 0
     
     def __call__(self, batch):
         label_ids_batch = []
@@ -95,6 +96,20 @@ class CollaterFn:
                 f"[INFO] Text tokens - input: {len(input_ids)}, "
                 f"answer: {len(answer_ids)}, total: {total_sequence_length}"
             )
+            if self.debug_counter < 3:
+                stripped_query = query.replace(IMG_CONTEXT_TOKEN, '')
+                stripped_query = stripped_query.replace(f'{IMG_START_TOKEN}{IMG_END_TOKEN}', '<image>')
+                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                print("[DEBUG] raw question:")
+                print(question)
+                print("[DEBUG] qformer_text:")
+                print(qformer_text)
+                print(f"[DEBUG] num_patches_list: {num_patches_list} | total_tiles: {sum(num_patches_list)}")
+                print("[DEBUG] training prompt without IMG_CONTEXT:")
+                print(stripped_query)
+                print("[DEBUG] answer text:")
+                print(answer)
+                self.debug_counter += 1
             
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
@@ -249,7 +264,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         # ==========================================
         # [MỚI] 4. DÙNG BATCH_ITERATOR ĐỂ CHẠY
         # ==========================================
-        for batch in tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i):
+        progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
+        for batch in progress_bar:
             i += 1
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
             
@@ -272,6 +288,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 model.clear_qformer_text()
             
             loss = outputs.loss / accum_steps
+            progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
             loss.backward()
             
             accumulated_loss_for_log += outputs.loss.item()

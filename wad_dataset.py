@@ -112,7 +112,7 @@ class WADDatasetForInternVL(Dataset):
             if self.response_format == 'direct_text':
                 text_content = """
 
-Analyze the scene and then give the final instruction.
+Analyze the scene and produce the final response only.
 """
             else:
                 text_content = """
@@ -130,13 +130,13 @@ Follow Chain-of-Thought reasoning:
             if has_question:
                 text_content += f"\n\nQuestion: {sample['QA']['Q']}"
                 if self.response_format == 'direct_text':
-                    text_content += "\n\nAnswer the question based on the scene."
+                    text_content += "\n\nAnswer the question directly based on the scene. Output only the answer text."
                 else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
             else:
                 if self.response_format == 'direct_text':
-                    text_content += "\n\nGive the alert or guidance that should be spoken to assist a visually impaired user."
+                    text_content += "\n\nGive the alert or guidance that should be spoken to assist a visually impaired user. Output only that final alert or guidance text."
                 else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
