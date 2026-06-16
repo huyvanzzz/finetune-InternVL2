@@ -16,6 +16,8 @@ sys.path.append('.')
 from scripts.metrics import VLMMetrics
 # Import các thành phần data từ project của bạn
 from wad_dataset import WADDatasetForInternVL
+from preprocessing import get_response_format
+from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 
@@ -73,6 +75,7 @@ def main():
     args = parse_args()
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
+    response_format = get_response_format(config)
 
     # 1. Load Base Model & Tokenizer
     model_name_or_path = config['model']['name']
@@ -96,11 +99,16 @@ def main():
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+    if qformer_enabled(config):
+        attach_qformer_bridge(model, config)
     model.eval()
 
     # 2. Load Checkpoint LoRA
     if args.checkpoint:
         print(f"Loading LoRA weights from: {args.checkpoint}")
+        if qformer_enabled(config):
+            load_qformer_bridge(model, args.checkpoint, strict=True)
+            print("✓ Q-Former bridge loaded successfully.")
         model.language_model = PeftModel.from_pretrained(
             model.language_model, 
             args.checkpoint, 
@@ -155,6 +163,7 @@ def main():
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
         split='test',
+        response_format=response_format,
     )
     
     test_loader = DataLoader(
@@ -188,13 +197,29 @@ def main():
                 early_stopping=True,
             )
             
+            if getattr(model, "qformer_enabled", False):
+                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                q_ids, q_mask = model.encode_qformer_texts(
+                    [qformer_text] * pixel_values.shape[0],
+                    device=pixel_values.device,
+                )
+                model.set_qformer_text(q_ids, q_mask)
             response = model.chat(tokenizer, pixel_values, question, generation_config)
+            if getattr(model, "qformer_enabled", False):
+                model.clear_qformer_text()
+            question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
+            response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
+            ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
             
             predictions.append(response)
             references.append(ground_truth)
             
             if i < args.print_samples:
                 print(f"\n--- Sample {i+1} ---")
+                print(
+                    f"Token stats | Q: {question_token_count} | "
+                    f"Pred: {response_token_count} | GT: {ground_truth_token_count}"
+                )
                 print(f"Q: {question}")
                 print(f"Pred: {response}")
                 print(f"GT:   {ground_truth}")
@@ -207,8 +232,9 @@ def main():
             })
 
     # 5. Compute Metrics
-    print("\nComputing Metrics (ROUGE, TF-IDF) on 'instruction' field...")
-    metrics = evaluator.compute(predictions, references, target_field="instruction")
+    metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"
+    print(f"\nComputing Metrics (ROUGE, TF-IDF) on '{metric_target_field}'...")
+    metrics = evaluator.compute(predictions, references, target_field=metric_target_field)
 
     print("\n" + "="*50)
     print("🏆 KẾT QUẢ ĐÁNH GIÁ:")

@@ -5,7 +5,7 @@ import json
 sys.path.append('.')
 
 from scripts.metrics import VLMMetrics
-from preprocessing import map_metadata_to_ground_truth
+from preprocessing import format_ground_truth, get_response_format, map_metadata_to_ground_truth
 from datasets import load_dataset
 
 def main():
@@ -18,6 +18,7 @@ def main():
     print(f"Loading config from: {args.config}")
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+    response_format = get_response_format(config)
     
     # Load training dataset
     print("Loading training dataset...")
@@ -35,9 +36,11 @@ def main():
     
     for i, sample in enumerate(metadata):
         try:
-            # Get ground truth
-            gt = map_metadata_to_ground_truth(sample)
-            instruction = gt.instruction
+            if response_format == "direct_text":
+                instruction = format_ground_truth(sample, response_format)
+            else:
+                gt = map_metadata_to_ground_truth(sample)
+                instruction = gt.instruction
             
             if instruction and len(instruction) > 0:
                 corpus.append(instruction)

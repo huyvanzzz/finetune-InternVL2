@@ -37,6 +37,13 @@ logger = get_logger()
 from wad_dataset import build_dataset  
 from model.modeling_internvl_chat import InternVLChatModel
 from model.conversation import get_conv_template
+from qformer_bridge import (
+    attach_qformer_bridge,
+    load_qformer_bridge,
+    qformer_enabled,
+    save_qformer_bridge,
+    trainable_parameter_summary,
+)
 
 IMG_START_TOKEN = '<img>'
 IMG_END_TOKEN = '</img>'
@@ -56,6 +63,7 @@ class CollaterFn:
         input_ids_batch = []
         attention_mask_batch = []
         pixel_values_batch = []
+        qformer_texts = []
         samples_batch = []
 
         for sample in batch:
@@ -82,6 +90,11 @@ class CollaterFn:
             
             input_ids = self.tokenizer.encode(query, add_special_tokens=False)
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
+            total_sequence_length = len(input_ids) + len(answer_ids) + 1
+            print(
+                f"[INFO] Text tokens - input: {len(input_ids)}, "
+                f"answer: {len(answer_ids)}, total: {total_sequence_length}"
+            )
             
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
@@ -92,23 +105,45 @@ class CollaterFn:
             input_ids_batch.append(input_ids)
             attention_mask_batch.append(attention_mask)
             pixel_values_batch.append(torch.cat(pixel_values, dim=0))
+            if getattr(self.model, "qformer_enabled", False):
+                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                qformer_texts.extend([qformer_text] * sum(num_patches_list))
 
         input_ids_tensor = maybe_pad(input_ids_batch, eot_token_id)
         label_ids_tensor = maybe_pad(label_ids_batch, -100)
         attention_mask_tensor = maybe_pad(attention_mask_batch, 0)
-        return input_ids_tensor, label_ids_tensor, attention_mask_tensor, torch.cat(pixel_values_batch), samples_batch
+        pixel_values_tensor = torch.cat(pixel_values_batch)
+        qformer_inputs = None
+        if getattr(self.model, "qformer_enabled", False):
+            qformer_inputs = self.model.encode_qformer_texts(qformer_texts)
+        return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
 
 def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
     model.eval()
     with torch.no_grad():
         total_test_batches = 0
         for batch in tqdm(val_loader_with_shuffle):
-            _, _, _, _, samples = batch 
+            _, _, _, _, _, samples = batch 
             for sample in samples:
                 pixel_values = torch.cat(sample['pixel_values'], dim=0).to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
+                if getattr(model, "qformer_enabled", False):
+                    q_ids, q_mask = model.encode_qformer_texts(
+                        [sample.get("qformer_text", question.replace("<image>", "").strip())] * pixel_values.shape[0],
+                        device=pixel_values.device,
+                    )
+                    model.set_qformer_text(q_ids, q_mask)
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
+                question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
+                response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
+                ground_truth_token_count = len(tokenizer.encode(sample["answer"], add_special_tokens=False))
+                logger.info(
+                    f"\nToken stats | question: {question_token_count} | "
+                    f"response: {response_token_count} | ground_truth: {ground_truth_token_count}"
+                )
                 logger.info(f'\nUser: {question}\nAssistant: {response}\nGround truth:{sample["answer"]}\n\n')
             total_test_batches += 1
             if total_test_batches == 2:
@@ -120,16 +155,20 @@ def eval_model(model, val_loader, step, epoch, epochs):
         total_eval_loss = 0
         total_eval_batchs = 0
         for batch in tqdm(val_loader, desc=f"Validation after {step} batches training in epoch {epoch + 1}/{epochs}"):
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, _ = batch
+            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
             pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
             
             outputs = model(
                 input_ids=input_ids_batch, pixel_values=pixel_values_batch, labels=label_ids_batch, image_flags=image_flags_batch, return_dict=True
             )
+            if getattr(model, "qformer_enabled", False):
+                model.clear_qformer_text()
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
@@ -149,10 +188,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     max_grad_norm = float(config['training']['max_grad_norm'])
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
-    logger.info(f"Trainable params for LoRA: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    for row in trainable_parameter_summary(model):
+        logger.info(f"Trainable | {row}")
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=weight_decay)
     
     total_training_steps = (len(train_loader) * epochs) // accum_steps
     lr_scheduler = get_cosine_schedule_with_warmup(
@@ -166,6 +207,9 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     # ==========================================
     if resume_dir and os.path.exists(resume_dir):
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
+        if getattr(model, "qformer_enabled", False):
+            load_qformer_bridge(model, resume_dir, strict=True)
+            logger.info("Loaded Q-Former bridge states successfully!")
         
         opt_path = os.path.join(resume_dir, "optimizer.pt")
         sch_path = os.path.join(resume_dir, "scheduler.pt")
@@ -182,6 +226,9 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     # ==========================================
     for epoch in range(start_epoch, epochs):
         model.train()
+        if getattr(model, "qformer_enabled", False):
+            model.qformer.eval()
+            model.mlp1.eval()
         optimizer.zero_grad()
         
         accumulated_loss_for_log = 0.0 
@@ -204,13 +251,15 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         # ==========================================
         for batch in tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i):
             i += 1
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, _ = batch
+            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
             
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
             pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
 
             outputs = model(
                 input_ids=input_ids_batch, 
@@ -219,6 +268,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 image_flags=image_flags_batch, 
                 return_dict=True
             )
+            if getattr(model, "qformer_enabled", False):
+                model.clear_qformer_text()
             
             loss = outputs.loss / accum_steps
             loss.backward()
@@ -248,6 +299,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
                 
                 model.language_model.save_pretrained(step_save_dir)
+                save_qformer_bridge(model, step_save_dir)
                 tokenizer.save_pretrained(step_save_dir) 
                 # ==========================================
                 # [MỚI] 5. LƯU THÊM OPTIMIZER VÀ SCHEDULER
@@ -259,6 +311,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         os.makedirs(epoch_save_dir, exist_ok=True)
         logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
         model.language_model.save_pretrained(epoch_save_dir)
+        save_qformer_bridge(model, epoch_save_dir)
         tokenizer.save_pretrained(epoch_save_dir)
         # Lưu Optimizer cho cuối epoch
         torch.save(optimizer.state_dict(), os.path.join(epoch_save_dir, "optimizer.pt"))
@@ -297,6 +350,8 @@ if __name__ == "__main__":
     # 4. Đóng băng Vision Model
     if config['model']['vision']['freeze_encoder']:
         model.vision_model.requires_grad_(False)
+    if qformer_enabled(config):
+        attach_qformer_bridge(model, config, logger=logger)
     
     # 5. Cấu hình LoRA
     logger.info("Applying LoRA...")
@@ -356,7 +411,7 @@ if __name__ == "__main__":
         val_loader_with_shuffle=val_loader_with_shuffle,
         config=config,
         output_dir=output_dir,
-        resume_dir=None,
-        start_epoch=1,
-        start_step=500,
+        resume_dir=config['training'].get('resume_dir'),
+        start_epoch=config['training'].get('start_epoch', 0),
+        start_step=config['training'].get('start_step', 0),
     )

@@ -6,7 +6,7 @@ from typing import List, Dict
 import random
 from sklearn.model_selection import train_test_split
 import torch
-from preprocessing import map_metadata_to_ground_truth
+from preprocessing import format_ground_truth, get_response_format
 # BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
 from data import process_image
 
@@ -17,11 +17,13 @@ class WADDatasetForInternVL(Dataset):
         frame_index: dict,
         bbox_by_folder: dict,
         split: str = 'train',
+        response_format: str = 'structured_json',
     ):
         self.metadata = metadata_dataset[split]
         self.frame_index = frame_index
         self.bbox_by_folder = bbox_by_folder
         self.split = split
+        self.response_format = response_format
 
     def __len__(self):
         return len(self.metadata)
@@ -96,7 +98,8 @@ class WADDatasetForInternVL(Dataset):
             
             # 1. Load Ảnh
             frame_ids = self._select_frames_safe(frame_path)
-            frames = self._load_frames(frame_path, frame_ids)
+            last_frame_id = frame_ids[-1]
+            frames = self._load_frames(frame_path, [last_frame_id])
             
             # 2. Xử lý ảnh bằng hàm của tác giả zhangfaen (Tự cắt tile, tự tạo tensor)
             pixel_values = [process_image(img) for img in frames]
@@ -106,7 +109,13 @@ class WADDatasetForInternVL(Dataset):
             # polm_text = "\n".join([f"- {polm.to_text()}" for polm in polm_list])
             
             # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
-            text_content = f"""
+            if self.response_format == 'direct_text':
+                text_content = """
+
+Analyze the scene and then give the final instruction.
+"""
+            else:
+                text_content = """
 
 Analyze: location, weather, traffic, scene → then give instruction.
 
@@ -120,23 +129,29 @@ Follow Chain-of-Thought reasoning:
             
             if has_question:
                 text_content += f"\n\nQuestion: {sample['QA']['Q']}"
-                text_content += """\n\nFormat response:
+                if self.response_format == 'direct_text':
+                    text_content += "\n\nAnswer the question based on the scene."
+                else:
+                    text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
             else:
-                text_content += """\n\nFormat response:
+                if self.response_format == 'direct_text':
+                    text_content += "\n\nGive the alert or guidance that should be spoken to assist a visually impaired user."
+                else:
+                    text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
 
             # Chốt lại: Gắn thẻ <image>\n lên đầu để mô hình biết vị trí nhét ảnh
-            question = f"<image><image><image>\n{text_content}"
+            question = f"<image>\n{text_content}"
             
             # 4. Tạo Answer (Ground Truth)
-            ground_truth_dict = map_metadata_to_ground_truth(sample)
-            answer = f"<answer>{ground_truth_dict.to_json()}</answer>"
+            answer = format_ground_truth(sample, self.response_format)
 
             # 5. Trả về đúng Dict cho train.py
             return {
                 'question': question, 
                 'answer': answer, 
+                'qformer_text': text_content.strip(),
                 'pixel_values': pixel_values, 
                 'questionId': str(idx),
                 'image': frames
@@ -153,6 +168,8 @@ def build_dataset(config: Dict):
     from collections import defaultdict
     import pickle
     import os
+    
+    response_format = get_response_format(config)
     
     # Load metadata
     print("Loading metadata...")
@@ -217,6 +234,7 @@ def build_dataset(config: Dict):
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
         split='train',
+        response_format=response_format,
     )
     
     # Train/val split
