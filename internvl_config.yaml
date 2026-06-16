@@ -54,7 +54,7 @@ data:
   num_frames: 1
   train_split: 0.9
   seed: 42
-  response_format: "structured_json"
+  response_format: "direct_text"
 
 training:
   output_dir: "./outputs/internvl3_2b"
