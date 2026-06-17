@@ -311,6 +311,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     warmup_steps = config["training"]["warmup_steps"]
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
+    log_token_stats = bool(config["training"].get("log_token_stats", False))
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
@@ -362,7 +363,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         else:
             i = 0
             
-        train_loader.collate_fn.log_token_stats = False
+        train_loader.collate_fn.log_token_stats = log_token_stats
         progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
         for batch in progress_bar:
             i += 1
