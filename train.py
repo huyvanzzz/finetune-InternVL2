@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import yaml
 from huggingface_hub import snapshot_download
-from peft import PeftModel, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -65,7 +65,6 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
-DEFAULT_LORA_CHECKPOINT = "huyvanzzz/internvl2.5_config1"
 
 
 def parse_args():
@@ -135,6 +134,20 @@ def resolve_resume_config(args, config):
     return checkpoint, int(start_epoch or 0), int(start_step or 0)
 
 
+def build_fresh_lora_model(language_model, config, logger):
+    lora_cfg = config["model"]["lora"]
+    peft_config = LoraConfig(
+        r=lora_cfg["r"],
+        lora_alpha=lora_cfg["alpha"],
+        target_modules=lora_cfg["target_modules"],
+        lora_dropout=lora_cfg["dropout"],
+        bias=lora_cfg["bias"],
+        task_type=lora_cfg["task_type"],
+    )
+    logger.info("Initializing a fresh LoRA adapter from config.")
+    return get_peft_model(language_model, peft_config)
+
+
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -145,6 +158,7 @@ class CollaterFn:
         self.tokenizer = tokenizer
         self.model = model
         self.log_token_stats = False
+        self.token_log_remaining = 0
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -177,7 +191,7 @@ class CollaterFn:
 
             input_ids = self.tokenizer.encode(query, add_special_tokens=False)
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
-            if self.log_token_stats:
+            if self.log_token_stats and self.token_log_remaining != 0:
                 total_image_tokens_in_sample = total_tiles * self.model.num_image_token
                 total_sequence_length = len(input_ids) + len(answer_ids) + 1
                 logger.info(
@@ -193,6 +207,8 @@ class CollaterFn:
                     len(answer_ids),
                     total_sequence_length,
                 )
+                if self.token_log_remaining > 0:
+                    self.token_log_remaining -= 1
 
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
@@ -454,13 +470,15 @@ if __name__ == "__main__":
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
-    lora_checkpoint = resume_dir or DEFAULT_LORA_CHECKPOINT
-    logger.info(f"Loading LoRA adapter from: {lora_checkpoint}")
-    model.language_model = PeftModel.from_pretrained(
-        model.language_model,
-        lora_checkpoint,
-        is_trainable=True,
-    )
+    if resume_dir:
+        logger.info(f"Loading LoRA adapter from checkpoint: {resume_dir}")
+        model.language_model = PeftModel.from_pretrained(
+            model.language_model,
+            resume_dir,
+            is_trainable=True,
+        )
+    else:
+        model.language_model = build_fresh_lora_model(model.language_model, config, logger)
 
     model.language_model.print_trainable_parameters()
     model.train()
@@ -469,6 +487,8 @@ if __name__ == "__main__":
     train_dataset, val_dataset = build_dataset(config)
 
     collate_fn_wrapper = CollaterFn(tokenizer, model)
+    collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
+    collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
