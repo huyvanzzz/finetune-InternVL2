@@ -29,6 +29,17 @@ def log_runtime_prompt_state(model, stage):
         f"system_message={repr(getattr(model, 'system_message', ''))}"
     )
 
+
+def align_language_model_devices(model):
+    target_device = torch.device("cuda:0")
+    input_embeddings = model.language_model.get_input_embeddings()
+    input_embeddings.to(device=target_device)
+    output_embeddings = model.language_model.get_output_embeddings()
+    if output_embeddings is not None:
+        output_embeddings.to(device=target_device)
+    embedding_device = next(input_embeddings.parameters()).device
+    print(f"[DEVICE CHECK] input_embeddings device: {embedding_device}")
+
 class TestCollaterFn:
     def __init__(self, tokenizer, model) -> None:
         self.tokenizer = tokenizer
@@ -132,6 +143,7 @@ def main():
         print("No checkpoint provided. Evaluating Zero-shot (Base Model).")
     if not config['model']['quantization']['enabled']:
         model = model.cuda()
+    align_language_model_devices(model)
 
     # ==========================================
     # 3. CHUẨN BỊ TẬP TEST CHÍNH XÁC THEO ARGUMENTS
