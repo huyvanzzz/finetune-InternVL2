@@ -491,6 +491,14 @@ if __name__ == "__main__":
     collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
 
+    logger.info(
+        "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s",
+        getattr(model, "qformer_enabled", False),
+        getattr(model, "num_image_token", "unknown"),
+        collate_fn_wrapper.log_token_stats,
+        collate_fn_wrapper.token_log_remaining,
+    )
+
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
     )
