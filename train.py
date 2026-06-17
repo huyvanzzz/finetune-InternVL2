@@ -1,12 +1,15 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import argparse
 import datetime
+import re
 import random
 
 import numpy as np
 import torch
 import yaml
+from huggingface_hub import snapshot_download
 from peft import PeftModel, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
@@ -50,6 +53,73 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+DEFAULT_LORA_CHECKPOINT = "huyvanzzz/internvl2.5_config1"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train InternVL with optional checkpoint resume.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Optional checkpoint dir to resume from. Omit this flag to train from the default LoRA/base setup.",
+    )
+    parser.add_argument("--start_epoch", type=int, default=None, help="Zero-based epoch index to resume from.")
+    parser.add_argument("--start_step", type=int, default=None, help="Batch step inside the resume epoch.")
+    return parser.parse_args()
+
+
+def infer_resume_position(checkpoint_dir):
+    name = os.path.basename(os.path.normpath(checkpoint_dir))
+    step_match = re.fullmatch(r"epoch_(\d+)_step_(\d+)", name)
+    if step_match:
+        epoch_num = int(step_match.group(1))
+        step = int(step_match.group(2))
+        return max(epoch_num - 1, 0), step
+
+    epoch_match = re.fullmatch(r"epoch_(\d+)", name)
+    if epoch_match:
+        epoch_num = int(epoch_match.group(1))
+        return epoch_num, 0
+
+    return None, None
+
+
+def resolve_checkpoint_path(checkpoint):
+    if not checkpoint:
+        return None
+    if os.path.exists(checkpoint):
+        return checkpoint
+    logger.info(f"Checkpoint is not a local path. Downloading from Hugging Face: {checkpoint}")
+    return snapshot_download(
+        repo_id=checkpoint,
+        allow_patterns=[
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "qformer_bridge.safetensors",
+            "qformer_bridge_config.json",
+            "optimizer.pt",
+            "scheduler.pt",
+            "tokenizer*",
+            "special_tokens_map.json",
+            "added_tokens.json",
+        ],
+    )
+
+
+def resolve_resume_config(args, config):
+    checkpoint = resolve_checkpoint_path(args.checkpoint)
+    start_epoch = args.start_epoch
+    start_step = args.start_step
+
+    inferred_epoch, inferred_step = infer_resume_position(checkpoint) if checkpoint else (None, None)
+    if start_epoch is None:
+        start_epoch = inferred_epoch if inferred_epoch is not None else 0
+    if start_step is None:
+        start_step = inferred_step if inferred_step is not None else 0
+
+    return checkpoint, int(start_epoch or 0), int(start_step or 0)
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -316,6 +386,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    resume_dir, start_epoch, start_step = resolve_resume_config(args, config)
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
 
@@ -354,10 +426,11 @@ if __name__ == "__main__":
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
 
-    hf_repo_id = "huyvanzzz/internvl2.5_config1"
+    lora_checkpoint = resume_dir or DEFAULT_LORA_CHECKPOINT
+    logger.info(f"Loading LoRA adapter from: {lora_checkpoint}")
     model.language_model = PeftModel.from_pretrained(
         model.language_model,
-        hf_repo_id,
+        lora_checkpoint,
         is_trainable=True,
     )
 
@@ -390,7 +463,7 @@ if __name__ == "__main__":
         val_loader_with_shuffle=val_loader_with_shuffle,
         config=config,
         output_dir=output_dir,
-        resume_dir=config["training"].get("resume_dir"),
-        start_epoch=config["training"].get("start_epoch", 0),
-        start_step=config["training"].get("start_step", 0),
+        resume_dir=resume_dir,
+        start_epoch=start_epoch,
+        start_step=start_step,
     )
