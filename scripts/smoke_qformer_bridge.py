@@ -9,6 +9,22 @@ sys.path.append(".")
 from qformer_bridge import attach_qformer_bridge, qformer_enabled, trainable_parameter_summary
 
 
+def gpu_supports_bf16():
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(0)
+    return major >= 8
+
+
+def resolve_runtime_dtype(config, use_cpu=False):
+    if use_cpu:
+        return torch.float32
+    wants_bf16 = config["model"]["quantization"].get("compute_dtype", "bfloat16") == "bfloat16"
+    if wants_bf16 and gpu_supports_bf16():
+        return torch.bfloat16
+    return torch.float16
+
+
 def main():
     parser = argparse.ArgumentParser(description="Smoke test InternVL Q-Former bridge.")
     parser.add_argument("--config", default="internvl_config.yaml")
@@ -19,23 +35,26 @@ def main():
         config = yaml.safe_load(f)
     if not qformer_enabled(config):
         raise SystemExit("Q-Former is disabled; smoke test skipped.")
+    runtime_dtype = resolve_runtime_dtype(config, use_cpu=args.cpu)
+    print(f"Runtime dtype selected: {runtime_dtype}")
 
     quant_cfg = None
     if not args.cpu and config["model"]["quantization"]["enabled"]:
         quant_cfg = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=runtime_dtype,
             bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
             bnb_4bit_quant_type=config["model"]["quantization"]["type"],
         )
 
     model = AutoModel.from_pretrained(
         config["model"]["name"],
-        torch_dtype=torch.bfloat16 if not args.cpu else torch.float32,
+        torch_dtype=runtime_dtype,
         quantization_config=quant_cfg,
         low_cpu_mem_usage=True,
         trust_remote_code=config["model"]["trust_remote_code"],
     )
+    model.runtime_dtype = runtime_dtype
     attach_qformer_bridge(model, config)
     model.vision_model.requires_grad_(False)
     model.eval()
@@ -49,7 +68,7 @@ def main():
         3,
         448,
         448,
-        dtype=torch.float32 if args.cpu else torch.bfloat16,
+        dtype=runtime_dtype,
         device=device,
     )
     q_ids, q_mask = model.encode_qformer_texts(
