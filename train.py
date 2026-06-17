@@ -52,15 +52,6 @@ IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 
 
-def log_runtime_prompt_state(model, stage):
-    logger.info(
-        "[PROMPT STATE][%s] template=%s | system_message=%s",
-        stage,
-        getattr(model, "template", "unknown"),
-        repr(getattr(model, "system_message", "")),
-    )
-
-
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -70,11 +61,6 @@ class CollaterFn:
     def __init__(self, tokenizer, model) -> None:
         self.tokenizer = tokenizer
         self.model = model
-        self.debug_counter = 0
-
-    def _log_debug_block(self, message):
-        logger.info(message)
-        tqdm.write(message)
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -123,37 +109,6 @@ class CollaterFn:
                 len(answer_ids),
                 total_sequence_length,
             )
-
-            if self.debug_counter < 3:
-                stripped_query = query.replace(IMG_CONTEXT_TOKEN, "")
-                stripped_query = stripped_query.replace(f"{IMG_START_TOKEN}{IMG_END_TOKEN}", "<image>")
-                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                compact_query = query
-                for num_patches in num_patches_list:
-                    full_image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
-                    compact_image_tokens = (
-                        f"{IMG_START_TOKEN}<IMG_CONTEXT x {self.model.num_image_token * num_patches}>{IMG_END_TOKEN}"
-                    )
-                    compact_query = compact_query.replace(full_image_tokens, compact_image_tokens, 1)
-
-                debug_message = (
-                    "\n========== DEBUG SAMPLE ==========\n"
-                    f"question_id: {sample.get('questionId', 'unknown')}\n"
-                    f"response_format: {config.get('data', {}).get('response_format', 'structured_json')}\n"
-                    f"raw_question:\n{question}\n\n"
-                    f"qformer_text:\n{qformer_text}\n\n"
-                    f"tiles_per_frame: {num_patches_list}\n"
-                    f"total_tiles: {total_tiles}\n"
-                    f"query_tokens_per_tile: {self.model.num_image_token}\n"
-                    f"total_image_tokens: {total_image_tokens_in_sample}\n\n"
-                    f"training_prompt_compact:\n{compact_query}\n\n"
-                    f"training_prompt_without_img_context:\n{stripped_query}\n\n"
-                    f"answer_text:\n{answer}\n\n"
-                    f"token_counts => input: {len(input_ids)} | answer: {len(answer_ids)} | total: {total_sequence_length}\n"
-                    "=================================="
-                )
-                self._log_debug_block(debug_message)
-                self.debug_counter += 1
 
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
@@ -388,9 +343,7 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-    log_runtime_prompt_state(model, "after_load_before_override")
     model.system_message = SYSTEM_MESSAGE
-    log_runtime_prompt_state(model, "after_override")
 
     if config["model"]["vision"]["freeze_encoder"]:
         model.vision_model.requires_grad_(False)
