@@ -23,20 +23,6 @@ IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 
 
-def gpu_supports_bf16():
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(0)
-    return major >= 8
-
-
-def resolve_runtime_dtype(config):
-    wants_bf16 = config["model"]["quantization"].get("compute_dtype", "bfloat16") == "bfloat16"
-    if wants_bf16 and gpu_supports_bf16():
-        return torch.bfloat16
-    return torch.float16
-
-
 def log_runtime_prompt_state(model, stage):
     print(
         f"[PROMPT STATE][{stage}] template={getattr(model, 'template', 'unknown')} | "
@@ -98,8 +84,6 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
     response_format = get_response_format(config)
-    runtime_dtype = resolve_runtime_dtype(config)
-    print(f"Runtime dtype selected: {runtime_dtype}")
 
     # 1. Load Base Model & Tokenizer
     model_name_or_path = config['model']['name']
@@ -108,19 +92,18 @@ def main():
     # 2. Cấu hình Quantization 4-bit
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=config['model']['quantization']['enabled'],
-        bnb_4bit_compute_dtype=runtime_dtype,
+        bnb_4bit_compute_dtype=torch.bfloat16 if config['model']['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
         bnb_4bit_use_double_quant=config['model']['quantization']['double_quant'],
         bnb_4bit_quant_type=config['model']['quantization']['type']
     )
     # 3. Load model
     model = AutoModel.from_pretrained(
         model_name_or_path,
-        torch_dtype=runtime_dtype,
+        torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
         trust_remote_code=config['model']['trust_remote_code']
     )
-    model.runtime_dtype = runtime_dtype
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
@@ -213,7 +196,7 @@ def main():
     with torch.no_grad():
         for i, batch in enumerate(tqdm(test_loader, desc="Testing")):
             sample = batch[0]
-            pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(runtime_dtype).cuda()
+            pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
             question = str(sample['question'])
             ground_truth = str(sample['answer'])
             

@@ -10,6 +10,9 @@ def init_logger(log_dir="./"):
     global _logger
     _logger = logging.getLogger('MyLogger')
     _logger.setLevel(logging.INFO)  # Set the default logging level to INFO
+    _logger.propagate = False
+    if _logger.handlers:
+        _logger.handlers.clear()
 
     # Create a formatter with detailed format including filename and line number
     _formatter = logging.Formatter('%(asctime)s-%(filename)s:%(lineno)d-%(levelname)s >> %(message)s', datefmt='%Y-%m-%d %H:%M:%S')

@@ -52,20 +52,6 @@ IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 
 
-def gpu_supports_bf16():
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(0)
-    return major >= 8
-
-
-def resolve_runtime_dtype(config):
-    wants_bf16 = config["model"]["quantization"].get("compute_dtype", "bfloat16") == "bfloat16"
-    if wants_bf16 and gpu_supports_bf16():
-        return torch.bfloat16
-    return torch.float16
-
-
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -148,14 +134,13 @@ class CollaterFn:
 
 
 def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
-    runtime_dtype = getattr(model, "runtime_dtype", torch.float16)
     model.eval()
     with torch.no_grad():
         total_test_batches = 0
         for batch in tqdm(val_loader_with_shuffle):
             _, _, _, _, _, samples = batch
             for sample in samples:
-                pixel_values = torch.cat(sample["pixel_values"], dim=0).to(runtime_dtype).cuda()
+                pixel_values = torch.cat(sample["pixel_values"], dim=0).to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
                 if getattr(model, "qformer_enabled", False):
@@ -181,7 +166,6 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
 
 
 def eval_model(model, val_loader, step, epoch, epochs):
-    runtime_dtype = getattr(model, "runtime_dtype", torch.float16)
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
@@ -191,7 +175,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(runtime_dtype).cuda()
+            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
             if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
                 model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
@@ -214,7 +198,6 @@ def eval_model(model, val_loader, step, epoch, epochs):
 
 
 def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
-    runtime_dtype = getattr(model, "runtime_dtype", torch.float16)
     epochs = config["training"]["num_epochs"]
     lr = float(config["training"]["learning_rate"])
     accum_steps = config["training"]["gradient_accumulation_steps"]
@@ -224,8 +207,6 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    for row in trainable_parameter_summary(model):
-        logger.info(f"Trainable | {row}")
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
     optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=weight_decay)
@@ -280,7 +261,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(runtime_dtype).cuda()
+            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
             if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
                 model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
@@ -337,12 +318,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 if __name__ == "__main__":
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
-    runtime_dtype = resolve_runtime_dtype(config)
-    logger.info(f"Runtime dtype selected: {runtime_dtype}")
 
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=config["model"]["quantization"]["enabled"],
-        bnb_4bit_compute_dtype=runtime_dtype,
+        bnb_4bit_compute_dtype=torch.bfloat16 if config["model"]["quantization"]["compute_dtype"] == "bfloat16" else torch.float16,
         bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
         bnb_4bit_quant_type=config["model"]["quantization"]["type"],
     )
@@ -350,12 +329,11 @@ if __name__ == "__main__":
     logger.info(f"Loading model {model_name_or_path} in 4-bit...")
     model = AutoModel.from_pretrained(
         model_name_or_path,
-        torch_dtype=runtime_dtype,
+        torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
         trust_remote_code=config["model"]["trust_remote_code"],
     )
-    model.runtime_dtype = runtime_dtype
 
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
@@ -374,7 +352,7 @@ if __name__ == "__main__":
     model.language_model = prepare_model_for_kbit_training(model.language_model)
 
     if hasattr(model.language_model, "get_input_embeddings"):
-        model.language_model.get_input_embeddings().to(runtime_dtype)
+        model.language_model.get_input_embeddings().to(torch.bfloat16)
 
     hf_repo_id = "huyvanzzz/internvl2.5_config1"
     model.language_model = PeftModel.from_pretrained(
