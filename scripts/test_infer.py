@@ -18,6 +18,7 @@ from scripts.metrics import VLMMetrics
 from wad_dataset import WADDatasetForInternVL
 from preprocessing import get_response_format
 from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
+from model.conversation import get_conv_template
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
@@ -38,7 +39,38 @@ def align_language_model_devices(model):
     if output_embeddings is not None:
         output_embeddings.to(device=target_device)
     embedding_device = next(input_embeddings.parameters()).device
-    print(f"[DEVICE CHECK] input_embeddings device: {embedding_device}")
+    print(f"[DEVICE CHECK] input_embeddings device: {embedding_device}", flush=True)
+
+
+def run_model_chat(model, tokenizer, pixel_values, question, generation_config):
+    num_patches_list = [pixel_values.shape[0]] if pixel_values is not None else []
+    template = get_conv_template(model.template)
+    template.system_message = model.system_message
+    eos_token_id = tokenizer.convert_tokens_to_ids(template.sep)
+    template.append_message(template.roles[0], question)
+    template.append_message(template.roles[1], None)
+    query = template.get_prompt()
+
+    for num_patches in num_patches_list:
+        image_tokens = "<img>" + "<IMG_CONTEXT>" * model.num_image_token * num_patches + "</img>"
+        query = query.replace("<image>", image_tokens, 1)
+
+    model_inputs = tokenizer(query, return_tensors="pt")
+    embedding_device = model.language_model.get_input_embeddings().weight.device
+    input_ids = model_inputs["input_ids"].to(embedding_device)
+    attention_mask = model_inputs["attention_mask"].to(embedding_device)
+    generation_config = dict(generation_config)
+    generation_config["eos_token_id"] = eos_token_id
+    generation_config["pad_token_id"] = eos_token_id
+
+    generation_output = model.generate(
+        pixel_values=pixel_values,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **generation_config,
+    )
+    response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
+    return response.split(template.sep)[0].strip()
 
 class TestCollaterFn:
     def __init__(self, tokenizer, model) -> None:
@@ -231,7 +263,7 @@ def main():
                     device=pixel_values.device,
                 )
                 model.set_qformer_text(q_ids, q_mask)
-            response = model.chat(tokenizer, pixel_values, question, generation_config)
+            response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
             if getattr(model, "qformer_enabled", False):
                 model.clear_qformer_text()
             question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
