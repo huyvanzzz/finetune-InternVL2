@@ -131,6 +131,7 @@ class CollaterFn:
     def __init__(self, tokenizer, model) -> None:
         self.tokenizer = tokenizer
         self.model = model
+        self.log_token_stats = False
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -157,28 +158,28 @@ class CollaterFn:
 
             num_patches_list = [pv.shape[0] for pv in pixel_values]
             total_tiles = sum(num_patches_list)
-            total_image_tokens_in_sample = total_tiles * self.model.num_image_token
-            logger.info(
-                "[INFO] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
-                len(pixel_values),
-                num_patches_list,
-                self.model.num_image_token,
-                total_image_tokens_in_sample,
-            )
-
             for num_patches in num_patches_list:
                 image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
                 query = query.replace("<image>", image_tokens, 1)
 
             input_ids = self.tokenizer.encode(query, add_special_tokens=False)
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
-            total_sequence_length = len(input_ids) + len(answer_ids) + 1
-            logger.info(
-                "[INFO] Text tokens - input: %s, answer: %s, total: %s",
-                len(input_ids),
-                len(answer_ids),
-                total_sequence_length,
-            )
+            if self.log_token_stats:
+                total_image_tokens_in_sample = total_tiles * self.model.num_image_token
+                total_sequence_length = len(input_ids) + len(answer_ids) + 1
+                logger.info(
+                    "[INFO] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    len(pixel_values),
+                    num_patches_list,
+                    self.model.num_image_token,
+                    total_image_tokens_in_sample,
+                )
+                logger.info(
+                    "[INFO] Text tokens - input: %s, answer: %s, total: %s",
+                    len(input_ids),
+                    len(answer_ids),
+                    total_sequence_length,
+                )
 
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
@@ -280,6 +281,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
     optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=weight_decay)
+    save_steps = config["training"].get("save_steps")
 
     total_training_steps = (len(train_loader) * epochs) // accum_steps
     lr_scheduler = get_cosine_schedule_with_warmup(
@@ -314,15 +316,17 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         accumulated_loss_for_log = 0.0
         set_seed(42 + epoch)
         batch_iterator = iter(train_loader)
+        train_loader.collate_fn.log_token_stats = False
 
         if epoch == start_epoch and start_step > 0:
             logger.info(f" Skipping {start_step} batches to resume state...")
-            for _ in range(start_step):
+            for _ in tqdm(range(start_step), desc="Skipping to resume point", leave=False):
                 next(batch_iterator)
             i = start_step
         else:
             i = 0
-
+            
+        train_loader.collate_fn.log_token_stats = False
         progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
         for batch in progress_bar:
             i += 1
@@ -364,7 +368,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            if i % config["training"]["save_steps"] == 0:
+            if save_steps and i % save_steps == 0:
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
                 os.makedirs(step_save_dir, exist_ok=True)
                 logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
