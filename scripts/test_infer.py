@@ -198,24 +198,7 @@ def main():
     )
 
     total_samples = len(dataset_dict["test"])
-    if total_samples > 100 and args.split == "test_alter":
-        
-        dataset_dict["test"] = dataset_dict["test"].add_column("label_copy", dataset_dict["test"]["danger_level"])
-
-        # 2. Ép kiểu cột bản sao này (không đụng chạm tới cột gốc)
-        dataset_dict["test"] = dataset_dict["test"].class_encode_column("label_copy")
-
-        # 3. Phân tầng dựa trên cột bản sao
-        split_ds = dataset_dict["test"].train_test_split(
-            test_size=0.2, 
-            stratify_by_column="label_copy", 
-            seed=42
-        )
-
-        # 4. Xóa cột bản sao đi là xong!
-        split_ds = split_ds.remove_columns("label_copy")
-        dataset_dict["test"] = split_ds["test"]
-        print(f"{len(dataset_dict['test'])}")
+    print(f"Loaded full test split with {total_samples} samples.")
 
     test_dataset = WADDatasetForInternVL(
         metadata_dataset=dataset_dict,
