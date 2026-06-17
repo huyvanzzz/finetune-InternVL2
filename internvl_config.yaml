@@ -37,7 +37,7 @@ model:
     task_type: "CAUSAL_LM"
 
   quantization:
-    enabled: true
+    enabled: 
     bits: 4
     type: "nf4"
     double_quant: true
