@@ -5,6 +5,7 @@ import argparse
 import datetime
 import re
 import random
+import sys
 
 import numpy as np
 import torch
@@ -29,7 +30,18 @@ def set_seed(seed=42):
 
 set_seed(42)
 
-with open("internvl_config.yaml", "r") as f:
+def get_config_path_from_argv(default="internvl_config.yaml"):
+    for idx, arg in enumerate(sys.argv):
+        if arg == "--config" and idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+        if arg.startswith("--config="):
+            return arg.split("=", 1)[1]
+    return default
+
+
+CONFIG_PATH = get_config_path_from_argv()
+
+with open(CONFIG_PATH, "r") as f:
     config = yaml.safe_load(f)
 
 base_out_dir = config["training"]["output_dir"]
@@ -58,6 +70,7 @@ DEFAULT_LORA_CHECKPOINT = "huyvanzzz/internvl2.5_config1"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train InternVL with optional checkpoint resume.")
+    parser.add_argument("--config", type=str, default=CONFIG_PATH, help="Path to YAML config file.")
     parser.add_argument(
         "--checkpoint",
         type=str,
