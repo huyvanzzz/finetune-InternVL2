@@ -241,7 +241,8 @@ def eval_model(model, val_loader, step, epoch, epochs):
     with torch.no_grad():
         total_eval_loss = 0
         total_eval_batchs = 0
-        for batch in tqdm(val_loader, desc=f"Validation after {step} batches training in epoch {epoch + 1}/{epochs}"):
+        eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
+        for batch in tqdm(val_loader, desc=eval_desc, leave=False):
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
@@ -265,7 +266,12 @@ def eval_model(model, val_loader, step, epoch, epochs):
             total_eval_batchs += 1
             if total_eval_batchs == 200:
                 break
-        logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {total_eval_loss / total_eval_batchs:.4f}")
+        avg_eval_loss = total_eval_loss / total_eval_batchs if total_eval_batchs > 0 else float("nan")
+        logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {avg_eval_loss:.4f}")
+    model.train()
+    if getattr(model, "qformer_enabled", False):
+        model.qformer.eval()
+        model.mlp1.eval()
 
 
 def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
@@ -275,6 +281,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     weight_decay = float(config["training"]["weight_decay"])
     warmup_steps = config["training"]["warmup_steps"]
     max_grad_norm = float(config["training"]["max_grad_norm"])
+    eval_steps = config["training"].get("eval_steps")
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
@@ -367,6 +374,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+            if eval_steps and i % eval_steps == 0:
+                logger.info(f"Running evaluation at step {i}...")
+                eval_model(model, val_loader, i, epoch, epochs)
 
             if save_steps and i % save_steps == 0:
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"

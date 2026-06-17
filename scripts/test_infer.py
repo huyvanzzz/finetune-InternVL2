@@ -101,6 +101,7 @@ def main():
         model_name_or_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
+        device_map="auto",
         low_cpu_mem_usage=True,
         trust_remote_code=config['model']['trust_remote_code']
     )
@@ -124,10 +125,13 @@ def main():
             model.language_model, 
             args.checkpoint, 
             is_trainable=False,
+            device_map="auto",
         )
         print("✓ LoRA Adapter loaded successfully.")
     else:
         print("No checkpoint provided. Evaluating Zero-shot (Base Model).")
+    if not config['model']['quantization']['enabled']:
+        model = model.cuda()
 
     # ==========================================
     # 3. CHUẨN BỊ TẬP TEST CHÍNH XÁC THEO ARGUMENTS
