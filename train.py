@@ -148,6 +148,25 @@ def build_fresh_lora_model(language_model, config, logger):
     return get_peft_model(language_model, peft_config)
 
 
+def sanitize_optimizer_state_dict(optimizer_state_dict):
+    state = optimizer_state_dict.get("state", {})
+    converted = 0
+    for param_state in state.values():
+        if not isinstance(param_state, dict):
+            continue
+        for key in ("exp_avg", "exp_avg_sq"):
+            tensor = param_state.get(key)
+            if torch.is_tensor(tensor) and tensor.dtype != torch.float32:
+                param_state[key] = tensor.float()
+                converted += 1
+    return optimizer_state_dict, converted
+
+
+def export_sanitized_optimizer_state_dict(optimizer):
+    optimizer_state_dict = optimizer.state_dict()
+    return sanitize_optimizer_state_dict(optimizer_state_dict)
+
+
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -337,8 +356,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         sch_path = os.path.join(resume_dir, "scheduler.pt")
 
         if os.path.exists(opt_path) and os.path.exists(sch_path):
-            optimizer.load_state_dict(torch.load(opt_path))
+            optimizer_state_dict, converted = sanitize_optimizer_state_dict(torch.load(opt_path, map_location="cpu"))
+            optimizer.load_state_dict(optimizer_state_dict)
             lr_scheduler.load_state_dict(torch.load(sch_path))
+            if converted:
+                logger.info("Sanitized %s optimizer state tensors to float32 after load.", converted)
             logger.info("Loaded Optimizer and Scheduler states successfully!")
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
@@ -417,7 +439,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 model.language_model.save_pretrained(step_save_dir)
                 save_qformer_bridge(model, step_save_dir)
                 tokenizer.save_pretrained(step_save_dir)
-                torch.save(optimizer.state_dict(), os.path.join(step_save_dir, "optimizer.pt"))
+                optimizer_state_dict, converted = export_sanitized_optimizer_state_dict(optimizer)
+                if converted:
+                    logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+                torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
                 torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
 
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
@@ -426,7 +451,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         model.language_model.save_pretrained(epoch_save_dir)
         save_qformer_bridge(model, epoch_save_dir)
         tokenizer.save_pretrained(epoch_save_dir)
-        torch.save(optimizer.state_dict(), os.path.join(epoch_save_dir, "optimizer.pt"))
+        optimizer_state_dict, converted = export_sanitized_optimizer_state_dict(optimizer)
+        if converted:
+            logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+        torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
         torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
 
 
