@@ -167,6 +167,19 @@ def export_sanitized_optimizer_state_dict(optimizer):
     return sanitize_optimizer_state_dict(optimizer_state_dict)
 
 
+def move_optimizer_state_to_param_device(optimizer):
+    moved = 0
+    for param, param_state in optimizer.state.items():
+        if not isinstance(param_state, dict):
+            continue
+        param_device = param.device
+        for key, value in param_state.items():
+            if torch.is_tensor(value) and value.device != param_device:
+                param_state[key] = value.to(device=param_device)
+                moved += 1
+    return moved
+
+
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -363,9 +376,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         if os.path.exists(opt_path) and os.path.exists(sch_path):
             optimizer_state_dict, converted = sanitize_optimizer_state_dict(torch.load(opt_path, map_location="cpu"))
             optimizer.load_state_dict(optimizer_state_dict)
+            moved = move_optimizer_state_to_param_device(optimizer)
             lr_scheduler.load_state_dict(torch.load(sch_path))
             if converted:
                 logger.info("Sanitized %s optimizer state tensors to float32 after load.", converted)
+            if moved:
+                logger.info("Moved %s optimizer state tensors to parameter devices after load.", moved)
             logger.info("Loaded Optimizer and Scheduler states successfully!")
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
