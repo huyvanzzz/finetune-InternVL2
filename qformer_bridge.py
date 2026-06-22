@@ -165,19 +165,26 @@ def _extract_vit_tokens(model, pixel_values):
 
 def _ensure_bridge_device(model, reference: torch.Tensor):
     device = reference.device
-    dtype = reference.dtype
-    for module_name in ("qformer_input_proj", "qformer", "qformer_to_mlp1_proj"):
+    reference_dtype = reference.dtype
+
+    qformer = getattr(model, "qformer", None)
+    if qformer is not None:
+        qformer.to(device=device, dtype=reference_dtype)
+
+    for module_name in ("qformer_input_proj", "qformer_to_mlp1_proj"):
         module = getattr(model, module_name, None)
         if module is not None:
-            module.to(device=device, dtype=dtype)
-    model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=dtype)
+            module.to(device=device, dtype=torch.float32)
+
+    model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=reference_dtype)
 
 
 def _extract_feature_with_qformer(self, pixel_values):
     vit_embeds = _extract_vit_tokens(self, pixel_values)
     _ensure_bridge_device(self, vit_embeds)
 
-    encoder_hidden_states = self.qformer_input_proj(vit_embeds)
+    proj_in_dtype = next(self.qformer_input_proj.parameters()).dtype
+    encoder_hidden_states = self.qformer_input_proj(vit_embeds.to(proj_in_dtype))
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.size()[:-1],
         dtype=torch.long,
@@ -217,7 +224,10 @@ def _extract_feature_with_qformer(self, pixel_values):
         return_dict=True,
     )
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
-    mlp1_inputs = self.qformer_to_mlp1_proj(query_output)
+    proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
+    mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    mlp1_dtype = next(self.mlp1.parameters()).dtype
+    mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
     return self.mlp1(mlp1_inputs)
 
 
@@ -325,11 +335,11 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
     model.qformer_input_proj = nn.Sequential(
         nn.LayerNorm(pixel_shuffle_dim),
         nn.Linear(pixel_shuffle_dim, qformer_encoder_dim),
-    )
+    ).to(dtype=torch.float32)
     model.qformer_to_mlp1_proj = nn.Sequential(
         nn.LayerNorm(qformer_hidden_size),
         nn.Linear(qformer_hidden_size, pixel_shuffle_dim),
-    )
+    ).to(dtype=torch.float32)
     model.num_image_token = num_query_tokens
 
     if q_cfg["freeze_qformer"]:
