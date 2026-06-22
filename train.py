@@ -78,6 +78,11 @@ def parse_args():
     )
     parser.add_argument("--start_epoch", type=int, default=None, help="Zero-based epoch index to resume from.")
     parser.add_argument("--start_step", type=int, default=None, help="Batch step inside the resume epoch.")
+    parser.add_argument(
+        "--ignore_optimizer_state",
+        action="store_true",
+        help="Resume model weights only and skip loading optimizer/scheduler states.",
+    )
     return parser.parse_args()
 
 
@@ -303,7 +308,19 @@ def eval_model(model, val_loader, step, epoch, epochs):
         model.mlp1.eval()
 
 
-def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
+def train_model(
+    model,
+    tokenizer,
+    train_loader,
+    val_loader,
+    val_loader_with_shuffle,
+    config,
+    output_dir,
+    resume_dir=None,
+    start_epoch=0,
+    start_step=0,
+    ignore_optimizer_state=False,
+):
     epochs = config["training"]["num_epochs"]
     lr = float(config["training"]["learning_rate"])
     accum_steps = config["training"]["gradient_accumulation_steps"]
@@ -317,15 +334,26 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
-    optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=weight_decay)
+    total_training_steps = (len(train_loader) * epochs) // accum_steps
     save_steps = config["training"].get("save_steps")
 
-    total_training_steps = (len(train_loader) * epochs) // accum_steps
-    lr_scheduler = get_cosine_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_training_steps,
-    )
+    def build_optimizer_and_scheduler(last_epoch=-1):
+        optimizer = AdamW(
+            (p for p in model.parameters() if p.requires_grad),
+            lr=lr,
+            weight_decay=weight_decay,
+            foreach=False,
+        )
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_training_steps,
+            last_epoch=last_epoch,
+        )
+        return optimizer, scheduler
+
+    optimizer, lr_scheduler = build_optimizer_and_scheduler()
+    optimizer_state_loaded = False
 
     if resume_dir and os.path.exists(resume_dir):
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
@@ -336,10 +364,20 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         opt_path = os.path.join(resume_dir, "optimizer.pt")
         sch_path = os.path.join(resume_dir, "scheduler.pt")
 
-        if os.path.exists(opt_path) and os.path.exists(sch_path):
-            optimizer.load_state_dict(torch.load(opt_path))
-            lr_scheduler.load_state_dict(torch.load(sch_path))
-            logger.info("Loaded Optimizer and Scheduler states successfully!")
+        if ignore_optimizer_state:
+            logger.info("Skipping optimizer/scheduler state load because --ignore_optimizer_state was set.")
+        elif os.path.exists(opt_path) and os.path.exists(sch_path):
+            try:
+                optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+                lr_scheduler.load_state_dict(torch.load(sch_path, map_location="cpu"))
+                optimizer_state_loaded = True
+                logger.info("Loaded Optimizer and Scheduler states successfully!")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load optimizer/scheduler state from checkpoint. "
+                    "Will resume from model weights only with fresh optimizer state. Error: %s",
+                    exc,
+                )
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
 
@@ -401,8 +439,27 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     logger.info(f"Step {i//accum_steps} | Avg Loss: {avg_loss:.4f}")
                 accumulated_loss_for_log = 0.0
 
-                optimizer.step()
-                lr_scheduler.step()
+                try:
+                    optimizer.step()
+                    lr_scheduler.step()
+                except RuntimeError as exc:
+                    is_dtype_resume_error = (
+                        optimizer_state_loaded
+                        and ("BFloat16" in str(exc) or "expected dtype float" in str(exc))
+                    )
+                    if not is_dtype_resume_error:
+                        raise
+
+                    logger.warning(
+                        "Optimizer state appears incompatible with the current runtime during resume. "
+                        "Resetting optimizer/scheduler and continuing from model weights only. Error: %s",
+                        exc,
+                    )
+                    completed_updates = max((i // accum_steps) - 1, -1)
+                    optimizer, lr_scheduler = build_optimizer_and_scheduler(last_epoch=completed_updates)
+                    optimizer_state_loaded = False
+                    optimizer.step()
+                    lr_scheduler.step()
                 optimizer.zero_grad()
 
             if eval_steps and i % eval_steps == 0:
