@@ -159,7 +159,19 @@ def sanitize_optimizer_state_dict(optimizer_state_dict):
             if torch.is_tensor(tensor) and tensor.dtype != torch.float32:
                 param_state[key] = tensor.float()
                 converted += 1
-    return optimizer_state_dict, converted
+    param_groups = optimizer_state_dict.get("param_groups", [])
+    overridden_groups = 0
+    for group in param_groups:
+        changed = False
+        if group.get("foreach", None) is not False:
+            group["foreach"] = False
+            changed = True
+        if "fused" in group and group.get("fused", None) is not False:
+            group["fused"] = False
+            changed = True
+        if changed:
+            overridden_groups += 1
+    return optimizer_state_dict, converted, overridden_groups
 
 
 def export_sanitized_optimizer_state_dict(optimizer):
@@ -178,6 +190,32 @@ def move_optimizer_state_to_param_device(optimizer):
                 param_state[key] = value.to(device=param_device)
                 moved += 1
     return moved
+
+
+def enforce_safe_optimizer_param_groups(optimizer):
+    overridden_groups = 0
+    for group in optimizer.param_groups:
+        changed = False
+        if group.get("foreach", None) is not False:
+            group["foreach"] = False
+            changed = True
+        if "fused" in group and group.get("fused", None) is not False:
+            group["fused"] = False
+            changed = True
+        if changed:
+            overridden_groups += 1
+    return overridden_groups
+
+
+def count_optimizer_state_tensors_on_cpu(optimizer):
+    count = 0
+    for param_state in optimizer.state.values():
+        if not isinstance(param_state, dict):
+            continue
+        for value in param_state.values():
+            if torch.is_tensor(value) and value.device.type == "cpu":
+                count += 1
+    return count
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -355,6 +393,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         weight_decay=weight_decay,
         foreach=False,
     )
+    enforce_safe_optimizer_param_groups(optimizer)
     save_steps = config["training"].get("save_steps")
 
     total_training_steps = (len(train_loader) * epochs) // accum_steps
@@ -374,14 +413,23 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         sch_path = os.path.join(resume_dir, "scheduler.pt")
 
         if os.path.exists(opt_path) and os.path.exists(sch_path):
-            optimizer_state_dict, converted = sanitize_optimizer_state_dict(torch.load(opt_path, map_location="cpu"))
+            optimizer_state_dict, converted, overridden_groups = sanitize_optimizer_state_dict(
+                torch.load(opt_path, map_location="cpu")
+            )
             optimizer.load_state_dict(optimizer_state_dict)
+            overridden_groups_after_load = enforce_safe_optimizer_param_groups(optimizer)
             moved = move_optimizer_state_to_param_device(optimizer)
             lr_scheduler.load_state_dict(torch.load(sch_path))
             if converted:
                 logger.info("Sanitized %s optimizer state tensors to float32 after load.", converted)
+            if overridden_groups:
+                logger.info("Overrode foreach/fused flags in %s optimizer param_groups before load.", overridden_groups)
+            if overridden_groups_after_load:
+                logger.info("Re-applied safe foreach/fused flags to %s optimizer param_groups after load.", overridden_groups_after_load)
             if moved:
                 logger.info("Moved %s optimizer state tensors to parameter devices after load.", moved)
+            remaining_cpu_tensors = count_optimizer_state_tensors_on_cpu(optimizer)
+            logger.info("Optimizer state CPU tensor count after load: %s", remaining_cpu_tensors)
             logger.info("Loaded Optimizer and Scheduler states successfully!")
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
@@ -460,9 +508,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 model.language_model.save_pretrained(step_save_dir)
                 save_qformer_bridge(model, step_save_dir)
                 tokenizer.save_pretrained(step_save_dir)
-                optimizer_state_dict, converted = export_sanitized_optimizer_state_dict(optimizer)
+                optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
                 if converted:
                     logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+                if overridden_groups:
+                    logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
                 torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
                 torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
 
@@ -472,9 +522,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         model.language_model.save_pretrained(epoch_save_dir)
         save_qformer_bridge(model, epoch_save_dir)
         tokenizer.save_pretrained(epoch_save_dir)
-        optimizer_state_dict, converted = export_sanitized_optimizer_state_dict(optimizer)
+        optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
         if converted:
             logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+        if overridden_groups:
+            logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
         torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
         torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
 
