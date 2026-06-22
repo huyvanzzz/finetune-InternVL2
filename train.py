@@ -336,7 +336,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
-    optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=lr,
+        weight_decay=weight_decay,
+        foreach=False,
+    )
     save_steps = config["training"].get("save_steps")
 
     total_training_steps = (len(train_loader) * epochs) // accum_steps
