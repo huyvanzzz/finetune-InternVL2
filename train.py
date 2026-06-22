@@ -53,6 +53,7 @@ logger = get_logger()
 from wad_dataset import build_dataset
 from model.conversation import get_conv_template
 from qformer_bridge import (
+    align_qformer_bridge_runtime,
     attach_qformer_bridge,
     load_qformer_bridge,
     qformer_enabled,
@@ -407,6 +408,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
         if getattr(model, "qformer_enabled", False):
             load_qformer_bridge(model, resume_dir, strict=True)
+            align_qformer_bridge_runtime(model)
             logger.info("Loaded Q-Former bridge states successfully!")
 
         opt_path = os.path.join(resume_dir, "optimizer.pt")
@@ -565,6 +567,7 @@ if __name__ == "__main__":
         model.vision_model.requires_grad_(False)
     if qformer_enabled(config):
         attach_qformer_bridge(model, config, logger=logger)
+        align_qformer_bridge_runtime(model)
 
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
