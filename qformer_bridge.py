@@ -179,6 +179,28 @@ def _ensure_bridge_device(model, reference: torch.Tensor):
     model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=reference_dtype)
 
 
+def align_qformer_bridge_runtime(model):
+    if not getattr(model, "qformer_enabled", False):
+        return False
+
+    reference_param = None
+    for candidate_name in ("mlp1", "vision_model"):
+        module = getattr(model, candidate_name, None)
+        if module is None:
+            continue
+        try:
+            reference_param = next(module.parameters())
+            break
+        except StopIteration:
+            continue
+
+    if reference_param is None:
+        return False
+
+    _ensure_bridge_device(model, reference_param.data)
+    return True
+
+
 def _extract_feature_with_qformer(self, pixel_values):
     vit_embeds = _extract_vit_tokens(self, pixel_values)
     _ensure_bridge_device(self, vit_embeds)
