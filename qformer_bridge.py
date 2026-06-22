@@ -215,6 +215,9 @@ def _extract_feature_with_qformer(self, pixel_values):
         device=encoder_hidden_states.device,
     )
     qformer_attention_mask = torch.cat([query_attention_mask, qformer_attention_mask], dim=1)
+    qformer_dtype = next(self.qformer.parameters()).dtype
+    encoder_hidden_states = encoder_hidden_states.to(qformer_dtype)
+    query_tokens = query_tokens.to(qformer_dtype)
     query_outputs = self.qformer(
         input_ids=qformer_input_ids,
         attention_mask=qformer_attention_mask,
