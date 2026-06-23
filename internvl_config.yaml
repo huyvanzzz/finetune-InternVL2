@@ -59,10 +59,11 @@ data:
 training:
   output_dir: "./outputs/internvl3_2b"
   num_epochs: 3
-  batch_size: 1
-  gradient_accumulation_steps: 2
+  batch_size: 2
+  gradient_accumulation_steps: 8
   learning_rate: 2e-4
-  warmup_steps: 100
+  proj_learning_rate: 5e-4
+  warmup_steps: 200
   warmup_ratio: 0.03
   weight_decay: 0.01
   bf16: true
@@ -79,6 +80,8 @@ training:
   resume_dir: null
   start_epoch: 0
   start_step: 0
+  log_token_stats: true
+  token_log_batches: 5
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]

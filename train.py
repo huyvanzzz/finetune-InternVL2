@@ -388,9 +388,25 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
+    proj_lr = float(config["training"].get("proj_learning_rate", lr))
+    proj_param_names = {"qformer_input_proj", "qformer_to_mlp1_proj"}
+
+    proj_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and any(pn in n for pn in proj_param_names)
+    ]
+    other_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and not any(pn in n for pn in proj_param_names)
+    ]
+
+    logger.info(f"Param groups | proj_layers: {sum(p.numel() for p in proj_params):,} params @ lr={proj_lr} | lora+rest: {sum(p.numel() for p in other_params):,} params @ lr={lr}")
+
     optimizer = AdamW(
-        (p for p in model.parameters() if p.requires_grad),
-        lr=lr,
+        [
+            {"params": proj_params, "lr": proj_lr},
+            {"params": other_params, "lr": lr},
+        ],
         weight_decay=weight_decay,
         foreach=False,
     )
