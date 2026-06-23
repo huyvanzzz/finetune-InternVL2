@@ -4,6 +4,7 @@ import json
 import torch
 import argparse
 import pickle
+from huggingface_hub import snapshot_download
 from collections import defaultdict
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -80,10 +81,32 @@ class TestCollaterFn:
     def __call__(self, batch):
         return batch
 
+def resolve_checkpoint_path(checkpoint):
+    """Nếu checkpoint không phải local path, download từ HuggingFace về cache."""
+    if not checkpoint:
+        return None
+    if os.path.exists(checkpoint):
+        return checkpoint
+    print(f"Checkpoint '{checkpoint}' không phải local path. Đang tải từ HuggingFace...")
+    return snapshot_download(
+        repo_id=checkpoint,
+        allow_patterns=[
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "qformer_bridge.safetensors",
+            "qformer_bridge_config.json",
+            "tokenizer*",
+            "special_tokens_map.json",
+            "added_tokens.json",
+        ],
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Test InternVL VLM Model")
     parser.add_argument("--config", type=str, default="internvl_config.yaml")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Hugging Face Repo ID")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint dir hoặc HuggingFace Repo ID")
     parser.add_argument("--split", type=str, default="test_QA", choices=["test_QA", "test_alter", "val"])
     parser.add_argument("--output_file", type=str, default="results/eval_results.json")
     parser.add_argument("--print_samples", type=int, default=5)
@@ -124,12 +147,11 @@ def prepare_auxiliary_data(config):
 
 def main():
     args = parse_args()
+    # Resolve checkpoint: download từ HF nếu cần (trước mọi thao tác load)
+    args.checkpoint = resolve_checkpoint_path(args.checkpoint)
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
     response_format = get_response_format(config)
-
-    # 1. Load Base Model & Tokenizer
-    model_name_or_path = config['model']['name']
     batch_size = config['training']['batch_size']
         
     # 2. Cấu hình Quantization 4-bit
