@@ -152,6 +152,9 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
     response_format = get_response_format(config)
+
+    # 1. Load Base Model & Tokenizer
+    model_name_or_path = config['model']['name']
     batch_size = config['training']['batch_size']
         
     # 2. Cấu hình Quantization 4-bit
