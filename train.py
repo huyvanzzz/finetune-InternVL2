@@ -372,6 +372,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
     if getattr(model, "qformer_enabled", False):
         model.qformer.eval()
         model.mlp1.eval()
+    return avg_eval_loss
 
 
 def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
@@ -383,6 +384,14 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
     log_token_stats = bool(config["training"].get("log_token_stats", False))
+    metrics_path = os.path.join(output_dir, "metrics.json")
+
+    def save_metrics(metrics: dict):
+        import json
+        with open(metrics_path, "w", encoding="utf-8") as _f:
+            json.dump(metrics, _f, indent=2, ensure_ascii=False)
+
+    metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
@@ -506,8 +515,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
                 avg_loss = accumulated_loss_for_log / accum_steps
-                if (i // accum_steps) % 50 == 0:
-                    logger.info(f"Step {i//accum_steps} | Avg Loss: {avg_loss:.4f}")
+                global_step = i // accum_steps
+                metrics["train_loss"].append({"step": global_step, "epoch": epoch + 1, "loss": round(avg_loss, 6)})
+                if global_step % 50 == 0:
+                    logger.info(f"Step {global_step} | Avg Loss: {avg_loss:.4f}")
+                    save_metrics(metrics)
                 accumulated_loss_for_log = 0.0
 
                 optimizer.step()
@@ -516,7 +528,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
-                eval_model(model, val_loader, i, epoch, epochs)
+                val_loss = eval_model(model, val_loader, i, epoch, epochs)
+                if val_loss is not None:
+                    metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
+                    save_metrics(metrics)
 
             if save_steps and i % save_steps == 0:
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
@@ -547,6 +562,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
         torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
         torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
+
+        epoch_train = [e["loss"] for e in metrics["train_loss"] if e["epoch"] == epoch + 1]
+        avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
+        metrics["epoch_summary"].append({"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6)})
+        logger.info(f"Epoch {epoch+1} summary | avg_train_loss={avg_epoch_loss:.4f}")
+        save_metrics(metrics)
 
 
 if __name__ == "__main__":
