@@ -85,7 +85,7 @@ training:
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]
-  batch_size: 1
+  batch_size: 4
 
 hardware:
   device: "cuda"
