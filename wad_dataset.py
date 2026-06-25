@@ -108,6 +108,9 @@ class WADDatasetForInternVL(Dataset):
             # polm_list = self._load_bboxes(frame_path, frame_ids)
             # polm_text = "\n".join([f"- {polm.to_text()}" for polm in polm_list])
             
+            # Kiểm tra xem có câu hỏi phụ không
+            has_question = sample.get('QA') and sample['QA'].get('Q')
+            
             # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
             if self.response_format == 'direct_text':
                 if has_question:
