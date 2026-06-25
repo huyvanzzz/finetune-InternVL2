@@ -235,7 +235,7 @@ def main():
     
     test_loader = DataLoader(
         test_dataset,
-        batch_size=1,
+        batch_size=config['evaluation'].get('batch_size', 1),
         collate_fn=TestCollaterFn(tokenizer, model), 
         shuffle=False
     )
@@ -250,53 +250,55 @@ def main():
     evaluator = VLMMetrics()
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_loader, desc="Testing")):
-            sample = batch[0]
-            pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
-            question = str(sample['question'])
-            ground_truth = str(sample['answer'])
-            
-            generation_config = dict(
-                max_new_tokens=512,
-                num_beams=3,
-                do_sample=False,
-                repetition_penalty=1.3,
-                early_stopping=True,
-            )
-            
-            if getattr(model, "qformer_enabled", False):
-                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                q_ids, q_mask = model.encode_qformer_texts(
-                    [qformer_text] * pixel_values.shape[0],
-                    device=pixel_values.device,
+        global_idx = 0
+        for batch in tqdm(test_loader, desc="Testing"):
+            for sample in batch:
+                global_idx += 1
+                pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
+                question = str(sample['question'])
+                ground_truth = str(sample['answer'])
+                
+                generation_config = dict(
+                    max_new_tokens=512,
+                    num_beams=3,
+                    do_sample=False,
+                    repetition_penalty=1.3,
+                    early_stopping=True,
                 )
-                model.set_qformer_text(q_ids, q_mask)
-            response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
-            question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
-            response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
-            ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
-            
-            predictions.append(response)
-            references.append(ground_truth)
-            
-            if i < args.print_samples:
-                print(f"\n--- Sample {i+1} ---")
-                print(
-                    f"Token stats | Q: {question_token_count} | "
-                    f"Pred: {response_token_count} | GT: {ground_truth_token_count}"
-                )
-                print(f"Q: {question}")
-                print(f"Pred: {response}")
-                print(f"GT:   {ground_truth}")
-            
-            detailed_results.append({
-                "id": i,
-                "question": question,
-                "prediction": response,
-                "ground_truth": ground_truth
-            })
+                
+                if getattr(model, "qformer_enabled", False):
+                    qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                    q_ids, q_mask = model.encode_qformer_texts(
+                        [qformer_text] * pixel_values.shape[0],
+                        device=pixel_values.device,
+                    )
+                    model.set_qformer_text(q_ids, q_mask)
+                response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
+                question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
+                response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
+                ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
+                
+                predictions.append(response)
+                references.append(ground_truth)
+                
+                if global_idx - 1 < args.print_samples:
+                    print(f"\n--- Sample {global_idx} ---")
+                    print(
+                        f"Token stats | Q: {question_token_count} | "
+                        f"Pred: {response_token_count} | GT: {ground_truth_token_count}"
+                    )
+                    print(f"Q: {question}")
+                    print(f"Pred: {response}")
+                    print(f"GT:   {ground_truth}")
+                
+                detailed_results.append({
+                    "id": global_idx - 1,
+                    "question": question,
+                    "prediction": response,
+                    "ground_truth": ground_truth
+                })
 
     # 5. Compute Metrics
     metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"

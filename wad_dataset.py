@@ -110,7 +110,17 @@ class WADDatasetForInternVL(Dataset):
             
             # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
             if self.response_format == 'direct_text':
-                text_content = "Describe the scene for a visually impaired user based on the final frame."
+                if has_question:
+                    text_content = (
+                        "Based on this image, answer the following question for a visually impaired user directly in natural language.\n"
+                        f"Question: {sample['QA']['Q']}"
+                    )
+                else:
+                    text_content = (
+                        "Based on this image, provide an actionable navigation alert or guidance for a visually impaired user.\n"
+                        "Focus on immediate obstacles, safe direction, and what action the user should take.\n"
+                        "Provide only the final spoken guidance in natural language."
+                    )
             else:
                 text_content = """
 
@@ -121,28 +131,10 @@ Follow Chain-of-Thought reasoning:
 2. Comprehension: Synthesize details into the "scene".
 3. Decision: Formulate the final "instruction"."""
 
-            # Kiểm tra xem có câu hỏi phụ không
-            has_question = sample.get('QA') and sample['QA'].get('Q')
-            
-            if has_question:
-                if self.response_format == 'direct_text':
-                    text_content += (
-                        "\nFocus on obstacles, nearby people or vehicles, free walking space, direction, and safety."
-                        f"\nQuestion: {sample['QA']['Q']}"
-                    )
-                else:
+                if has_question:
                     text_content += f"\n\nQuestion: {sample['QA']['Q']}"
-                if self.response_format == 'direct_text':
-                    text_content += "\nAnswer the question directly in natural language."
-                else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
-            else:
-                if self.response_format == 'direct_text':
-                    text_content += (
-                        "\nFocus on immediate obstacles, safe direction, and what action the user should take."
-                        "\nProvide only the final spoken guidance in natural language."
-                    )
                 else:
                     text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
