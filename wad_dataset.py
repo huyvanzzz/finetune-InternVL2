@@ -120,9 +120,9 @@ class WADDatasetForInternVL(Dataset):
                     )
                 else:
                     text_content = (
-                        "Based on this image, provide an actionable navigation alert or guidance for a visually impaired user.\n"
-                        "Focus on immediate obstacles, safe direction, and what action the user should take.\n"
-                        "Provide only the final spoken guidance in natural language."
+                        "Describe the scene for a visually impaired user based on this image."
+                        "\nFocus on immediate obstacles, safe direction, and what action the user should take."
+                        "\nProvide only the final spoken guidance in natural language."
                     )
             else:
                 text_content = """
