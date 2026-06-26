@@ -159,6 +159,19 @@ Follow Chain-of-Thought reasoning:
             }
 
         except Exception as e:
+            frame_path = None
+            try:
+                frame_path = self.metadata[idx].get('frame_path')
+            except Exception:
+                pass
+
+            if self.split in ('test', 'val'):
+                print(
+                    f"[DATA ERROR][{self.split}] idx={idx} | frame_path={frame_path} | "
+                    f"error={type(e).__name__}: {e}"
+                )
+                return None
+
             new_idx = random.randint(0, len(self) - 1)
             return self.__getitem__(new_idx)
 

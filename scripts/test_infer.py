@@ -79,7 +79,7 @@ class TestCollaterFn:
         self.model = model
     
     def __call__(self, batch):
-        return batch
+        return [sample for sample in batch if sample is not None]
 
 def resolve_checkpoint_path(checkpoint):
     """Nếu checkpoint không phải local path, download từ HuggingFace về cache."""
@@ -249,9 +249,13 @@ def main():
 
     evaluator = VLMMetrics()
 
+    skipped_samples = 0
     with torch.no_grad():
         global_idx = 0
         for batch in tqdm(test_loader, desc="Testing"):
+            if not batch:
+                skipped_samples += 1
+                continue
             for sample in batch:
                 global_idx += 1
                 pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
@@ -304,6 +308,8 @@ def main():
     metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"
     print(f"\nComputing Metrics (ROUGE, TF-IDF) on '{metric_target_field}'...")
     metrics = evaluator.compute(predictions, references, target_field=metric_target_field)
+    if skipped_samples:
+        print(f"[INFO] Skipped {skipped_samples} empty test batches due to sample loading errors.")
 
     print("\n" + "="*50)
     print("🏆 KẾT QUẢ ĐÁNH GIÁ:")
