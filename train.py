@@ -2,6 +2,7 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
+import copy
 import datetime
 import re
 import random
@@ -176,7 +177,7 @@ def sanitize_optimizer_state_dict(optimizer_state_dict):
 
 
 def export_sanitized_optimizer_state_dict(optimizer):
-    optimizer_state_dict = optimizer.state_dict()
+    optimizer_state_dict = copy.deepcopy(optimizer.state_dict())
     return sanitize_optimizer_state_dict(optimizer_state_dict)
 
 
