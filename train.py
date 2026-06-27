@@ -15,7 +15,7 @@ from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, get_cosine_schedule_with_warmup
 
@@ -51,7 +51,7 @@ os.makedirs(output_dir, exist_ok=True)
 init_logger(output_dir)
 logger = get_logger()
 
-from wad_dataset import build_dataset
+from wad_dataset import build_balanced_sample_weights, build_dataset
 from model.conversation import get_conv_template
 from qformer_bridge import (
     align_qformer_bridge_runtime,
@@ -305,6 +305,44 @@ class CollaterFn:
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
 
 
+def build_train_sampler(train_dataset, config):
+    task_balance_cfg = config["training"].get("task_balancing", {})
+    if not task_balance_cfg.get("enabled", False):
+        logger.info("Task-balanced sampling disabled. Using standard shuffled DataLoader.")
+        return None
+
+    task_types = getattr(train_dataset, "task_types", None)
+    if not task_types:
+        logger.warning("Train dataset has no task_types metadata. Falling back to standard shuffle.")
+        return None
+
+    task_target_weights = {
+        "qa": float(task_balance_cfg.get("qa_weight", 0.4)),
+        "alter": float(task_balance_cfg.get("alter_weight", 0.6)),
+    }
+    total_target = sum(task_target_weights.values())
+    if total_target <= 0:
+        logger.warning("Invalid task target weights %s. Falling back to standard shuffle.", task_target_weights)
+        return None
+    task_target_weights = {
+        task_name: task_weight / total_target
+        for task_name, task_weight in task_target_weights.items()
+    }
+
+    sample_weights = build_balanced_sample_weights(task_types, task_target_weights)
+    logger.info(
+        "Task-balanced sampling enabled | qa_weight=%.4f | alter_weight=%.4f | samples=%s",
+        task_target_weights["qa"],
+        task_target_weights["alter"],
+        len(sample_weights),
+    )
+    return WeightedRandomSampler(
+        weights=torch.DoubleTensor(sample_weights),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+
 def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
     model.eval()
     with torch.no_grad():
@@ -365,8 +403,6 @@ def eval_model(model, val_loader, step, epoch, epochs):
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
-            if total_eval_batchs == 200:
-                break
         avg_eval_loss = total_eval_loss / total_eval_batchs if total_eval_batchs > 0 else float("nan")
         logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {avg_eval_loss:.4f}")
     model.train()
@@ -641,8 +677,13 @@ if __name__ == "__main__":
         collate_fn_wrapper.token_log_remaining,
     )
 
+    train_sampler = build_train_sampler(train_dataset, config)
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
+        train_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn_wrapper,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
     )
 
     val_loader = DataLoader(

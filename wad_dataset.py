@@ -1,4 +1,5 @@
 import tarfile
+from collections import Counter
 from torch.utils.data import Dataset
 from PIL import Image, UnidentifiedImageError
 import io
@@ -9,6 +10,45 @@ import torch
 from preprocessing import format_ground_truth, get_response_format
 # BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
 from data import process_image
+
+
+def get_sample_task_type(sample: Dict) -> str:
+    qa = sample.get("QA")
+    if qa and isinstance(qa, dict) and qa.get("Q"):
+        return "qa"
+    return "alter"
+
+
+def summarize_task_types(samples) -> Dict[str, int]:
+    counts = Counter(get_sample_task_type(sample) for sample in samples)
+    return {"qa": counts.get("qa", 0), "alter": counts.get("alter", 0)}
+
+
+def summarize_task_types_from_indices(metadata, indices) -> Dict[str, int]:
+    counts = Counter(get_sample_task_type(metadata[idx]) for idx in indices)
+    return {"qa": counts.get("qa", 0), "alter": counts.get("alter", 0)}
+
+
+def build_balanced_sample_weights(task_types, task_target_weights: Dict[str, float]):
+    counts = Counter(task_types)
+    weights = []
+    for task_type in task_types:
+        target_weight = float(task_target_weights.get(task_type, 0.0))
+        task_count = counts.get(task_type, 0)
+        if task_count <= 0 or target_weight <= 0:
+            weights.append(0.0)
+            continue
+        weights.append(target_weight / task_count)
+    return weights
+
+
+def resolve_eval_limit(eval_limit):
+    if eval_limit is None:
+        return None
+    eval_limit = int(eval_limit)
+    if eval_limit <= 0:
+        return None
+    return eval_limit
 
 class WADDatasetForInternVL(Dataset):
     def __init__(
@@ -254,24 +294,44 @@ def build_dataset(config: Dict):
     # Train/val split
     train_size = config['data']['train_split']
     indices = list(range(len(train_dataset)))
+    task_labels = [get_sample_task_type(train_dataset.metadata[idx]) for idx in indices]
+    overall_stats = summarize_task_types(train_dataset.metadata)
+    print(
+        f"  Task distribution (full train.json) | "
+        f"QA={overall_stats['qa']} | alter={overall_stats['alter']}"
+    )
     
     train_indices, val_indices = train_test_split(
         indices,
         train_size=train_size,
-        random_state=config['data']['seed']
+        random_state=config['data']['seed'],
+        stratify=task_labels,
     )
     
     from torch.utils.data import Subset
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(train_dataset, val_indices)
+    train_subset.task_types = [task_labels[idx] for idx in train_indices]
+    val_subset.task_types = [task_labels[idx] for idx in val_indices]
     
     print(f"✓ Train: {len(train_subset)}, Val: {len(val_subset)}")
+    train_stats = summarize_task_types_from_indices(train_dataset.metadata, train_indices)
+    val_stats = summarize_task_types_from_indices(train_dataset.metadata, val_indices)
+    print(
+        f"  Stratified split stats | "
+        f"train(QA={train_stats['qa']}, alter={train_stats['alter']}) | "
+        f"val(QA={val_stats['qa']}, alter={val_stats['alter']})"
+    )
     
     # Limit eval dataset size
-    eval_limit = config['data'].get('eval_limit', 200)
+    eval_limit = resolve_eval_limit(config['data'].get('eval_limit'))
     
-    if len(val_subset) > eval_limit:
+    if eval_limit is not None and len(val_subset) > eval_limit:
         print(f"  Limiting eval dataset: {len(val_subset)} → {eval_limit} samples")
         val_subset = Subset(val_subset, list(range(eval_limit)))
+        limited_indices = val_indices[:eval_limit]
+        val_subset.task_types = [task_labels[idx] for idx in limited_indices]
+        limited_stats = summarize_task_types_from_indices(train_dataset.metadata, limited_indices)
+        print(f"  Limited val stats | QA={limited_stats['qa']} | alter={limited_stats['alter']}")
 
     return train_subset, val_subset
