@@ -43,6 +43,16 @@ def align_language_model_devices(model):
     print(f"[DEVICE CHECK] input_embeddings device: {embedding_device}", flush=True)
 
 
+def log_eval_state(model, stage):
+    print(
+        f"[EVAL STATE][{stage}] "
+        f"model.training={model.training} | "
+        f"language_model.training={getattr(model.language_model, 'training', 'unknown')} | "
+        f"qformer.training={getattr(getattr(model, 'qformer', None), 'training', 'n/a')}",
+        flush=True,
+    )
+
+
 def run_model_chat(model, tokenizer, pixel_values, question, generation_config):
     num_patches_list = [pixel_values.shape[0]] if pixel_values is not None else []
     template = get_conv_template(model.template)
@@ -201,6 +211,12 @@ def main():
     if not config['model']['quantization']['enabled']:
         model = model.cuda()
     align_language_model_devices(model)
+    model.eval()
+    if hasattr(model, "language_model"):
+        model.language_model.eval()
+    if getattr(model, "qformer_enabled", False):
+        model.qformer.eval()
+    log_eval_state(model, "after_checkpoint_load")
 
     # ==========================================
     # 3. CHUẨN BỊ TẬP TEST CHÍNH XÁC THEO ARGUMENTS
