@@ -313,6 +313,12 @@ def build_dataset(config: Dict):
     val_subset = Subset(train_dataset, val_indices)
     train_subset.task_types = [task_labels[idx] for idx in train_indices]
     val_subset.task_types = [task_labels[idx] for idx in val_indices]
+
+    train_limit = resolve_eval_limit(config['data'].get('train_limit'))
+    if train_limit is not None and len(train_subset) > train_limit:
+        print(f"  Limiting train dataset: {len(train_subset)} → {train_limit} samples")
+        train_subset = Subset(train_subset, list(range(train_limit)))
+        train_subset.task_types = [task_labels[idx] for idx in train_indices[:train_limit]]
     
     print(f"✓ Train: {len(train_subset)}, Val: {len(val_subset)}")
     train_stats = summarize_task_types_from_indices(train_dataset.metadata, train_indices)

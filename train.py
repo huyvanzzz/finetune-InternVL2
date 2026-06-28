@@ -20,6 +20,7 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, get_cosine_schedule_with_warmup
 
 from logutil import get_logger, init_logger
+from resume_debug_tools import format_batch_sample_ids, runtime_rng_digest
 
 
 def set_seed(seed=42):
@@ -421,6 +422,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
     log_token_stats = bool(config["training"].get("log_token_stats", False))
+    debug_log_sample_ids = bool(config["training"].get("debug_log_sample_ids", False))
+    debug_log_rng_digest = bool(config["training"].get("debug_log_rng_digest", False))
     metrics_path = os.path.join(output_dir, "metrics.json")
 
     def save_metrics(metrics: dict):
@@ -507,13 +510,21 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
         accumulated_loss_for_log = 0.0
         set_seed(42 + epoch)
+        if debug_log_rng_digest:
+            logger.info("[DEBUG_RNG] epoch=%s stage=epoch_seed digest=%s", epoch + 1, runtime_rng_digest(include_cuda=torch.cuda.is_available()))
         batch_iterator = iter(train_loader)
         train_loader.collate_fn.log_token_stats = False
 
         if epoch == start_epoch and start_step > 0:
             logger.info(f" Skipping {start_step} batches to resume state...")
             for _ in tqdm(range(start_step), desc="Skipping to resume point", leave=False):
-                next(batch_iterator)
+                skipped_batch = next(batch_iterator)
+                if debug_log_sample_ids:
+                    logger.info(
+                        "[DEBUG_SAMPLE_IDS] epoch=%s action=skip ids=%s",
+                        epoch + 1,
+                        format_batch_sample_ids(skipped_batch[-1]),
+                    )
             i = start_step
         else:
             i = 0
@@ -522,7 +533,21 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
         for batch in progress_bar:
             i += 1
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, samples_batch = batch
+            if debug_log_sample_ids:
+                logger.info(
+                    "[DEBUG_SAMPLE_IDS] epoch=%s step=%s ids=%s",
+                    epoch + 1,
+                    i,
+                    format_batch_sample_ids(samples_batch),
+                )
+            if debug_log_rng_digest:
+                logger.info(
+                    "[DEBUG_RNG] epoch=%s step=%s stage=before_forward digest=%s",
+                    epoch + 1,
+                    i,
+                    runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+                )
 
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
@@ -562,6 +587,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                if debug_log_rng_digest:
+                    logger.info(
+                        "[DEBUG_RNG] epoch=%s step=%s stage=after_step digest=%s",
+                        epoch + 1,
+                        i,
+                        runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+                    )
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
