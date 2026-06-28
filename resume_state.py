@@ -1,7 +1,10 @@
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
+
+RUNTIME_STATE_FILENAME = "runtime_state.pt"
 
 
 def _pack_numpy_random_state(state):
@@ -64,3 +67,19 @@ def capture_full_runtime_state(include_cuda: bool) -> dict:
 def restore_full_runtime_state(state: dict) -> None:
     restore_python_rng_state(state["python"])
     restore_torch_rng_state(state["torch"])
+
+
+def save_runtime_state_file(checkpoint_dir, include_cuda: bool):
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    runtime_state = capture_full_runtime_state(include_cuda=include_cuda)
+    torch.save(runtime_state, checkpoint_dir / RUNTIME_STATE_FILENAME)
+    return runtime_state
+
+
+def load_runtime_state_file(checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    state_path = checkpoint_dir / RUNTIME_STATE_FILENAME
+    if not state_path.exists():
+        return None
+    return torch.load(state_path, map_location="cpu", weights_only=True)

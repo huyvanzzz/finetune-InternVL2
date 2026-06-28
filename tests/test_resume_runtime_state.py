@@ -1,5 +1,6 @@
 import io
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,9 +9,11 @@ from resume_state import (
     capture_full_runtime_state,
     capture_python_rng_state,
     capture_torch_rng_state,
+    load_runtime_state_file,
     restore_full_runtime_state,
     restore_python_rng_state,
     restore_torch_rng_state,
+    save_runtime_state_file,
 )
 
 
@@ -96,3 +99,22 @@ def test_capture_runtime_state_cpu_only_does_not_require_cuda():
 
     restore_python_rng_state(python_state)
     restore_torch_rng_state(torch_state)
+
+
+def test_runtime_state_file_roundtrip_restores_stream(tmp_path: Path):
+    random.seed(99)
+    np.random.seed(99)
+    torch.manual_seed(99)
+
+    save_runtime_state_file(tmp_path, include_cuda=False)
+    saved_state = load_runtime_state_file(tmp_path)
+
+    first_draw = _draw_random_triplet()
+    restore_full_runtime_state(saved_state)
+    replay_first_draw = _draw_random_triplet()
+
+    assert replay_first_draw == first_draw
+
+
+def test_load_runtime_state_file_returns_none_when_missing(tmp_path: Path):
+    assert load_runtime_state_file(tmp_path) is None

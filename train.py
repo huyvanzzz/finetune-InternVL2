@@ -21,6 +21,7 @@ from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, get_cosin
 
 from logutil import get_logger, init_logger
 from resume_debug_tools import format_batch_sample_ids, runtime_rng_digest
+from resume_state import load_runtime_state_file, restore_full_runtime_state, save_runtime_state_file
 
 
 def set_seed(seed=42):
@@ -432,6 +433,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             json.dump(metrics, _f, indent=2, ensure_ascii=False)
 
     metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
+    pending_runtime_state = None
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
@@ -501,6 +503,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
 
+        pending_runtime_state = load_runtime_state_file(resume_dir)
+        if pending_runtime_state is None:
+            logger.warning("No runtime_state.pt found in checkpoint. Resume will keep old seed+skip behavior only.")
+        else:
+            logger.info("Loaded runtime_state.pt from checkpoint.")
+
     for epoch in range(start_epoch, epochs):
         model.train()
         if getattr(model, "qformer_enabled", False):
@@ -525,6 +533,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                         epoch + 1,
                         format_batch_sample_ids(skipped_batch[-1]),
                     )
+            if pending_runtime_state is not None:
+                restore_full_runtime_state(pending_runtime_state)
+                logger.info(
+                    "[DEBUG_RNG] epoch=%s stage=restored_runtime_state digest=%s",
+                    epoch + 1,
+                    runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+                )
             i = start_step
         else:
             i = 0
@@ -617,6 +632,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
                 torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
                 torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
+                runtime_state = save_runtime_state_file(step_save_dir, include_cuda=torch.cuda.is_available())
+                logger.info(
+                    "[DEBUG_RNG] epoch=%s step=%s stage=saved_runtime_state digest=%s",
+                    epoch + 1,
+                    i,
+                    runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+                )
 
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
         os.makedirs(epoch_save_dir, exist_ok=True)
@@ -631,6 +653,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
         torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
         torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
+        save_runtime_state_file(epoch_save_dir, include_cuda=torch.cuda.is_available())
+        logger.info(
+            "[DEBUG_RNG] epoch=%s stage=saved_runtime_state_epoch digest=%s",
+            epoch + 1,
+            runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+        )
 
         epoch_train = [e["loss"] for e in metrics["train_loss"] if e["epoch"] == epoch + 1]
         avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
