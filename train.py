@@ -317,6 +317,13 @@ def build_train_sampler(train_dataset, config):
     if not task_types:
         logger.warning("Train dataset has no task_types metadata. Falling back to standard shuffle.")
         return None
+    unique_task_types = sorted(set(task_types))
+    if len(unique_task_types) <= 1:
+        logger.info(
+            "Task-balanced sampling skipped because train dataset only contains one task type: %s",
+            unique_task_types[0] if unique_task_types else "unknown",
+        )
+        return None
 
     task_target_weights = {
         "qa": float(task_balance_cfg.get("qa_weight", 0.4)),

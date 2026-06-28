@@ -29,6 +29,26 @@ def summarize_task_types_from_indices(metadata, indices) -> Dict[str, int]:
     return {"qa": counts.get("qa", 0), "alter": counts.get("alter", 0)}
 
 
+def get_allowed_task_types(task_filter: str):
+    normalized_filter = str(task_filter or "all").strip().lower()
+    if normalized_filter == "all":
+        return {"qa", "alter"}
+    if normalized_filter == "alter_only":
+        return {"alter"}
+    if normalized_filter == "qa_only":
+        return {"qa"}
+    raise ValueError(f"Unsupported task filter: {task_filter}")
+
+
+def filter_samples_by_task_filter(samples, task_filter: str):
+    allowed_task_types = get_allowed_task_types(task_filter)
+    return [sample for sample in samples if get_sample_task_type(sample) in allowed_task_types]
+
+
+def should_stratify_task_split(task_labels) -> bool:
+    return len(set(task_labels)) > 1
+
+
 def build_balanced_sample_weights(task_types, task_target_weights: Dict[str, float]):
     counts = Counter(task_types)
     weights = []
@@ -282,9 +302,35 @@ def build_dataset(config: Dict):
         image_size = tuple(config['model']['vision']['image_size'])
         print(f"✓ Using image size {image_size} for {architecture}")
     
-    # Create datasets
+    raw_train_samples = list(metadata["train"])
+    raw_stats = summarize_task_types(raw_train_samples)
+    print(
+        f"  Task distribution (full train.json) | "
+        f"QA={raw_stats['qa']} | alter={raw_stats['alter']}"
+    )
+
+    train_task_filter = config["data"].get("train_task_filter", "all")
+    val_task_filter = config["data"].get("val_task_filter", train_task_filter)
+    train_allowed = get_allowed_task_types(train_task_filter)
+    val_allowed = get_allowed_task_types(val_task_filter)
+    combined_allowed = train_allowed | val_allowed
+    filtered_train_samples = [
+        sample for sample in raw_train_samples
+        if get_sample_task_type(sample) in combined_allowed
+    ]
+    filtered_stats = summarize_task_types(filtered_train_samples)
+    print(
+        f"  After task filter union | train={train_task_filter} | val={val_task_filter} | "
+        f"QA={filtered_stats['qa']} | alter={filtered_stats['alter']}"
+    )
+    if not filtered_train_samples:
+        raise ValueError(
+            "Task filtering removed all training samples. "
+            f"train_task_filter={train_task_filter}, val_task_filter={val_task_filter}"
+        )
+
     train_dataset = WADDatasetForInternVL(
-        metadata_dataset=metadata,
+        metadata_dataset={"train": filtered_train_samples},
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
         split='train',
@@ -295,18 +341,31 @@ def build_dataset(config: Dict):
     train_size = config['data']['train_split']
     indices = list(range(len(train_dataset)))
     task_labels = [get_sample_task_type(train_dataset.metadata[idx]) for idx in indices]
-    overall_stats = summarize_task_types(train_dataset.metadata)
-    print(
-        f"  Task distribution (full train.json) | "
-        f"QA={overall_stats['qa']} | alter={overall_stats['alter']}"
-    )
-    
-    train_indices, val_indices = train_test_split(
-        indices,
+    split_kwargs = dict(
         train_size=train_size,
         random_state=config['data']['seed'],
-        stratify=task_labels,
     )
+    if should_stratify_task_split(task_labels):
+        split_kwargs["stratify"] = task_labels
+    else:
+        print("  Single-task dataset after filtering. Disabling stratified split.")
+
+    train_indices, val_indices = train_test_split(
+        indices,
+        **split_kwargs,
+    )
+    train_indices = [idx for idx in train_indices if task_labels[idx] in train_allowed]
+    val_indices = [idx for idx in val_indices if task_labels[idx] in val_allowed]
+    if not train_indices:
+        raise ValueError(
+            "No training samples remain after applying train_task_filter. "
+            f"train_task_filter={train_task_filter}"
+        )
+    if not val_indices:
+        raise ValueError(
+            "No validation samples remain after applying val_task_filter. "
+            f"val_task_filter={val_task_filter}"
+        )
     
     from torch.utils.data import Subset
     train_subset = Subset(train_dataset, train_indices)
@@ -324,7 +383,7 @@ def build_dataset(config: Dict):
     train_stats = summarize_task_types_from_indices(train_dataset.metadata, train_indices)
     val_stats = summarize_task_types_from_indices(train_dataset.metadata, val_indices)
     print(
-        f"  Stratified split stats | "
+        f"  Final split stats | "
         f"train(QA={train_stats['qa']}, alter={train_stats['alter']}) | "
         f"val(QA={val_stats['qa']}, alter={val_stats['alter']})"
     )
