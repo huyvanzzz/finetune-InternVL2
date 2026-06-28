@@ -79,9 +79,9 @@ training:
   save_steps: 2000
   save_total_limit: 2
   task_balancing:
-    enabled: true                                                                                                                                           
-    qa_weight: 0.4
-    alter_weight: 0.6
+    enabled: true
+    qa_weight: 0.25
+    alter_weight: 0.75
   resume_dir: null
   start_epoch: 0
   start_step: 0
