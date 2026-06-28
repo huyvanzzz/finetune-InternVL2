@@ -12,15 +12,6 @@ model:
 
   qformer:
     enabled: false
-    source_model: "Salesforce/instructblip-flan-t5-xl"
-    cache_dir: "./qformer_cache"
-    num_query_tokens: 32
-    freeze_qformer: true
-    freeze_mlp1: true
-    prompt_aware: true
-    max_text_length: 128
-    train_lora_llm: true
-    bridge_mode: "prompt_aware_preproj_mlp1"
 
   lora:
     enabled: true

@@ -43,6 +43,7 @@ def test_no_qformer_config_exists_and_defaults_to_alter_only():
         config = yaml.safe_load(f)
 
     assert config["model"]["qformer"]["enabled"] is False
+    assert set(config["model"]["qformer"].keys()) == {"enabled"}
     assert config["data"]["train_task_filter"] == "alter_only"
     assert config["data"]["val_task_filter"] == "alter_only"
 
