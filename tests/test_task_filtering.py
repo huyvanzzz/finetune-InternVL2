@@ -60,3 +60,26 @@ def test_run_no_qformer_notebook_uses_committed_config_without_generating_it():
     assert 'CONFIG_PATH = "internvl_config_no_qformer.yaml"' in notebook_source
     assert 'with open("internvl_config.yaml", "r", encoding="utf-8") as f:' not in notebook_source
     assert 'yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=False)' not in notebook_source
+
+
+def test_run_qformer_colab_notebook_targets_colab_and_supports_hf_resume():
+    notebook = json.loads(Path("run_qformer_colab.ipynb").read_text(encoding="utf-8"))
+    code_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    ]
+    notebook_source = "\n".join(code_cells)
+
+    assert 'PROJECT_DIR = "/content/finetune-InternVL2"' in notebook_source
+    assert 'CONFIG_PATH = "internvl_config.yaml"' in notebook_source
+    assert 'TRAIN_CHECKPOINT = ""' in notebook_source
+    assert 'CHECKPOINT_DIR = ""' in notebook_source
+    assert 'huggingface_hub' in notebook_source or 'from huggingface_hub import login' in notebook_source
+    assert 'subprocess.run(["python", "build_frame_index.py"]' in notebook_source
+    assert 'scripts/prepare_qformer.py --config' in notebook_source
+    assert 'scripts/smoke_qformer_bridge.py --config' in notebook_source
+    assert '"python", "train.py", "--config", CONFIG_PATH' in notebook_source
+    assert '--checkpoint", TRAIN_CHECKPOINT' in notebook_source
+    assert 'scripts/test_infer.py' in notebook_source
+    assert "/kaggle/working/" not in notebook_source
