@@ -233,6 +233,8 @@ class CollaterFn:
         self.model = model
         self.log_token_stats = False
         self.token_log_remaining = 0
+        self.log_prompt_samples = False
+        self.prompt_log_remaining = 0
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -304,6 +306,27 @@ class CollaterFn:
         qformer_inputs = None
         if getattr(self.model, "qformer_enabled", False):
             qformer_inputs = self.model.encode_qformer_texts(qformer_texts)
+        if self.log_prompt_samples and self.prompt_log_remaining != 0:
+            for sample in samples_batch:
+                if sample.get("task_type") != "alter":
+                    continue
+                logger.info(
+                    "[PROMPT SAMPLE] questionId=%s | frame_path=%s | task_type=%s | selected_prompt_id=%s\n"
+                    "selected_prompt_text:\n%s\n"
+                    "question:\n%s\n"
+                    "qformer_text:\n%s\n"
+                    "answer:\n%s",
+                    sample.get("questionId"),
+                    sample.get("frame_path"),
+                    sample.get("task_type"),
+                    sample.get("selected_prompt_id"),
+                    sample.get("selected_prompt_text"),
+                    sample.get("question"),
+                    sample.get("qformer_text"),
+                    sample.get("answer"),
+                )
+            if self.prompt_log_remaining > 0:
+                self.prompt_log_remaining -= 1
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
 
 
@@ -522,6 +545,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             model.qformer.eval()
             model.mlp1.eval()
         optimizer.zero_grad()
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
 
         accumulated_loss_for_log = 0.0
         set_seed(42 + epoch)
@@ -732,33 +757,39 @@ if __name__ == "__main__":
     logger.info("Building dataset...")
     train_dataset, val_dataset = build_dataset(config)
 
-    collate_fn_wrapper = CollaterFn(tokenizer, model)
-    collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
-    collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    train_collate_fn = CollaterFn(tokenizer, model)
+    train_collate_fn.log_token_stats = bool(config["training"].get("log_token_stats", False))
+    train_collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    train_collate_fn.log_prompt_samples = bool(config["training"].get("log_prompt_samples", False))
+    train_collate_fn.prompt_log_remaining = int(config["training"].get("prompt_log_batches", 0))
+    val_collate_fn = CollaterFn(tokenizer, model)
+    val_loader_with_shuffle_collate_fn = CollaterFn(tokenizer, model)
 
     logger.info(
-        "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s",
+        "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s | log_prompt_samples=%s | prompt_log_batches=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "num_image_token", "unknown"),
-        collate_fn_wrapper.log_token_stats,
-        collate_fn_wrapper.token_log_remaining,
+        train_collate_fn.log_token_stats,
+        train_collate_fn.token_log_remaining,
+        train_collate_fn.log_prompt_samples,
+        train_collate_fn.prompt_log_remaining,
     )
 
     train_sampler = build_train_sampler(train_dataset, config)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        collate_fn=collate_fn_wrapper,
+        collate_fn=train_collate_fn,
         shuffle=train_sampler is None,
         sampler=train_sampler,
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=False
+        val_dataset, batch_size=batch_size, collate_fn=val_collate_fn, shuffle=False
     )
 
     val_loader_with_shuffle = DataLoader(
-        val_dataset, batch_size=1, collate_fn=collate_fn_wrapper, shuffle=True
+        val_dataset, batch_size=1, collate_fn=val_loader_with_shuffle_collate_fn, shuffle=True
     )
 
     logger.info("STARTING TRAINING...")

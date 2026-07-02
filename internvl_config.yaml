@@ -58,6 +58,7 @@ data:
   val_task_filter: "alter_only"
   eval_limit: 0
   response_format: "direct_text"
+  direct_text_alter_prompt_mode: "balanced_v1"
 
 training:
   output_dir: "./outputs/internvl3_2b"
@@ -89,6 +90,8 @@ training:
   start_step: 0
   log_token_stats: true
   token_log_batches: 5
+  log_prompt_samples: true
+  prompt_log_batches: 2
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]

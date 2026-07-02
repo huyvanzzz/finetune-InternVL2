@@ -247,6 +247,8 @@ def main():
         bbox_by_folder=bbox_by_folder,
         split='test',
         response_format=response_format,
+        direct_text_alter_prompt_mode=config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy"),
+        seed=config["data"].get("seed", 42),
     )
     
     test_loader = DataLoader(
