@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Dict, Optional
 
 import torch
+from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
@@ -34,6 +35,15 @@ def maybe_pad(inner_lists, padding_value):
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
 
 
+class CloneOutputEmbeddingWrapper(nn.Module):
+    def __init__(self, embedding_module: nn.Module):
+        super().__init__()
+        self.embedding_module = embedding_module
+
+    def forward(self, *args, **kwargs):
+        return self.embedding_module(*args, **kwargs).clone()
+
+
 @contextmanager
 def _safe_distributed_rank():
     dist = getattr(torch, "distributed", None)
@@ -55,6 +65,27 @@ def _safe_distributed_rank():
         return
 
     yield
+
+
+def wrap_input_embeddings_for_safe_scatter(model):
+    language_model = getattr(model, "language_model", None)
+    if language_model is None:
+        return
+
+    get_embeddings = getattr(language_model, "get_input_embeddings", None)
+    if not callable(get_embeddings):
+        return
+
+    embedding_module = get_embeddings()
+    if isinstance(embedding_module, CloneOutputEmbeddingWrapper):
+        return
+
+    wrapped = CloneOutputEmbeddingWrapper(embedding_module)
+
+    def _get_input_embeddings():
+        return wrapped
+
+    language_model.get_input_embeddings = _get_input_embeddings
 
 
 class SailCollateFn:
@@ -144,6 +175,7 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
     model.system_message = SYSTEM_MESSAGE
+    wrap_input_embeddings_for_safe_scatter(model)
     return model, tokenizer
 
 

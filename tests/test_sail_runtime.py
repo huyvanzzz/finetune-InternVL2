@@ -202,3 +202,46 @@ def test_sail_forward_train_batch_tolerates_uninitialized_distributed(monkeypatc
     assert outputs["rank"] == 0
     assert outputs["pixel_values_shape"] == (2, 3, 2, 2)
     assert dummy_dist.calls == ["is_available", "is_initialized"]
+
+
+def test_wrap_input_embeddings_for_safe_scatter_returns_non_leaf_outputs():
+    from model_backends.sailvl.runtime import wrap_input_embeddings_for_safe_scatter
+
+    class LanguageModel:
+        def __init__(self):
+            self.embedding = torch.nn.Embedding(8, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    model = DummyModel()
+    model.language_model = LanguageModel()
+
+    wrap_input_embeddings_for_safe_scatter(model)
+
+    embeddings = model.language_model.get_input_embeddings()
+    outputs = embeddings(torch.tensor([[1, 2]], dtype=torch.long))
+
+    assert outputs.requires_grad is True
+    assert outputs.is_leaf is False
+
+
+def test_wrap_input_embeddings_for_safe_scatter_is_idempotent():
+    from model_backends.sailvl.runtime import wrap_input_embeddings_for_safe_scatter
+
+    class LanguageModel:
+        def __init__(self):
+            self.embedding = torch.nn.Embedding(8, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    model = DummyModel()
+    model.language_model = LanguageModel()
+
+    wrap_input_embeddings_for_safe_scatter(model)
+    first = model.language_model.get_input_embeddings()
+    wrap_input_embeddings_for_safe_scatter(model)
+    second = model.language_model.get_input_embeddings()
+
+    assert first is second
