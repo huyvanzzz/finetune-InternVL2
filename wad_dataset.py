@@ -217,8 +217,9 @@ class WADDatasetForInternVL(Dataset):
         task_type = get_sample_task_type(sample)
         if task_type == "qa":
             qa_prompt = (
-                "Based on this image, answer the following question for a visually impaired user directly in natural language.\n"
-                f"Question: {sample['QA']['Q']}"
+            "Describe the scene for a visually impaired user based on this frame.\n"
+            "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
+            f"Question: {sample['QA']['Q']}"
             )
             return "qa_default", qa_prompt
 
