@@ -152,3 +152,53 @@ def test_sail_load_backend_artifacts_rejects_foreign_bridge_backend(tmp_path):
 
     with pytest.raises(ValueError, match="Expected sailvl bridge backend"):
         load_backend_artifacts(DummyModel(), str(tmp_path), {"model": {"qformer": {"enabled": True}}})
+
+
+def test_sail_forward_train_batch_tolerates_uninitialized_distributed(monkeypatch):
+    from model_backends.sailvl.runtime import forward_train_batch
+
+    class DummyDistributed:
+        def __init__(self):
+            self.calls = []
+
+        def is_available(self):
+            self.calls.append("is_available")
+            return True
+
+        def is_initialized(self):
+            self.calls.append("is_initialized")
+            return False
+
+        def get_rank(self):
+            raise AssertionError("get_rank should not be called when distributed is not initialized")
+
+    class DummyTrainModel:
+        def __init__(self):
+            self.qformer_enabled = False
+            self.calls = 0
+
+        def __call__(self, **kwargs):
+            self.calls += 1
+            import torch.distributed as dist
+
+            rank = dist.get_rank()
+            return {"rank": rank, "pixel_values_shape": tuple(kwargs["pixel_values"].shape)}
+
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self, raising=False)
+    dummy_dist = DummyDistributed()
+    monkeypatch.setattr(torch, "distributed", dummy_dist)
+
+    batch = (
+        torch.zeros((1, 4), dtype=torch.long),
+        torch.zeros((1, 4), dtype=torch.long),
+        None,
+        torch.zeros((2, 3, 2, 2), dtype=torch.float32),
+        None,
+        [],
+    )
+
+    outputs = forward_train_batch(DummyTrainModel(), batch, config={})
+
+    assert outputs["rank"] == 0
+    assert outputs["pixel_values_shape"] == (2, 3, 2, 2)
+    assert dummy_dist.calls == ["is_available", "is_initialized"]

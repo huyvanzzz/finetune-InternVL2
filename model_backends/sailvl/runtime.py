@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import Dict, Optional
 
 import torch
@@ -31,6 +32,29 @@ SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
+
+
+@contextmanager
+def _safe_distributed_rank():
+    dist = getattr(torch, "distributed", None)
+    get_rank = getattr(dist, "get_rank", None)
+    is_available = getattr(dist, "is_available", None)
+    is_initialized = getattr(dist, "is_initialized", None)
+
+    if not callable(get_rank) or not callable(is_available) or not callable(is_initialized):
+        yield
+        return
+
+    if not is_available() or not is_initialized():
+        original_get_rank = dist.get_rank
+        dist.get_rank = lambda: 0
+        try:
+            yield
+        finally:
+            dist.get_rank = original_get_rank
+        return
+
+    yield
 
 
 class SailCollateFn:
@@ -143,13 +167,14 @@ def forward_train_batch(model, batch, config):
     image_flags_batch = _build_image_flags(pixel_values_batch).cuda()
     if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
         model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
-    outputs = model(
-        input_ids=input_ids_batch,
-        pixel_values=pixel_values_batch,
-        labels=label_ids_batch,
-        image_flags=image_flags_batch,
-        return_dict=True,
-    )
+    with _safe_distributed_rank():
+        outputs = model(
+            input_ids=input_ids_batch,
+            pixel_values=pixel_values_batch,
+            labels=label_ids_batch,
+            image_flags=image_flags_batch,
+            return_dict=True,
+        )
     if getattr(model, "qformer_enabled", False):
         model.clear_qformer_text()
     return outputs
