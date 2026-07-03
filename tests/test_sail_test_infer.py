@@ -61,6 +61,48 @@ class DummyModel(torch.nn.Module):
         return self
 
 
+def test_generation_pairs_helpers_create_clean_gptscore_payload():
+    import scripts.test_infer as test_infer
+
+    detailed_results = [
+        {
+            "id": 0,
+            "question": "<image>\nquestion 1",
+            "prediction": "generated answer 1",
+            "ground_truth": "gt answer 1",
+        },
+        {
+            "id": 1,
+            "question": "<image>\nquestion 2",
+            "prediction": "generated answer 2",
+            "ground_truth": "gt answer 2",
+        },
+    ]
+
+    pair_path = test_infer.get_generation_pairs_output_path("results/qformer_eval_test_alter.json")
+    payload = test_infer.build_generation_pairs_payload(
+        checkpoint="dummy-ckpt",
+        split="test_alter",
+        detailed_results=detailed_results,
+    )
+
+    assert pair_path == "results/qformer_eval_test_alter_pairs.json"
+    assert payload["checkpoint"] == "dummy-ckpt"
+    assert payload["split"] == "test_alter"
+    assert payload["pairs"] == [
+        {
+            "id": 0,
+            "ground_truth": "gt answer 1",
+            "generation": "generated answer 1",
+        },
+        {
+            "id": 1,
+            "ground_truth": "gt answer 2",
+            "generation": "generated answer 2",
+        },
+    ]
+
+
 def test_sail_test_infer_loads_backend_artifacts_instead_of_internvl_bridge(monkeypatch):
     import scripts.test_infer as test_infer
 

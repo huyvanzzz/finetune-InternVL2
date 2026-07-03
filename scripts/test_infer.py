@@ -156,6 +156,27 @@ def prepare_auxiliary_data(config):
         })
     return frame_index, bbox_by_folder
 
+
+def get_generation_pairs_output_path(output_file: str) -> str:
+    base, ext = os.path.splitext(output_file)
+    ext = ext or ".json"
+    return f"{base}_pairs{ext}"
+
+
+def build_generation_pairs_payload(checkpoint, split, detailed_results):
+    return {
+        "checkpoint": checkpoint,
+        "split": split,
+        "pairs": [
+            {
+                "id": sample.get("id"),
+                "ground_truth": sample.get("ground_truth", ""),
+                "generation": sample.get("prediction", ""),
+            }
+            for sample in detailed_results
+        ],
+    }
+
 def main():
     args = parse_args()
     # Resolve checkpoint: download từ HF nếu cần (trước mọi thao tác load)
@@ -368,6 +389,16 @@ def main():
     with open(args.output_file, "w", encoding="utf-8") as f:
         json.dump(final_output, f, ensure_ascii=False, indent=4)
     print(f"\n✓ Đã lưu chi tiết kết quả tại: {args.output_file}")
+
+    pairs_output_file = get_generation_pairs_output_path(args.output_file)
+    pairs_output = build_generation_pairs_payload(
+        checkpoint=args.checkpoint if args.checkpoint else "Base Model",
+        split=args.split,
+        detailed_results=detailed_results,
+    )
+    with open(pairs_output_file, "w", encoding="utf-8") as f:
+        json.dump(pairs_output, f, ensure_ascii=False, indent=4)
+    print(f"✓ Đã lưu cặp ground_truth/generation tại: {pairs_output_file}")
 
 if __name__ == "__main__":
     main()
