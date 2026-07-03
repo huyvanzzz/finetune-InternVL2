@@ -63,6 +63,7 @@ from qformer_bridge import (
     save_qformer_bridge,
     trainable_parameter_summary,
 )
+from model_backends import get_backend
 
 
 IMG_START_TOKEN = "<img>"
@@ -407,31 +408,36 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
-def eval_model(model, val_loader, step, epoch, epochs):
+def eval_model(model, val_loader, step, epoch, epochs, backend=None):
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
         total_eval_batchs = 0
         eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
         for batch in tqdm(val_loader, desc=eval_desc, leave=False):
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
-            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+            if batch[-1] == []:
+                continue
+            if backend is not None and backend.name == "sailvl":
+                outputs = backend.forward_eval_batch(model, batch, config)
+            else:
+                input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+                input_ids_batch = input_ids_batch.cuda()
+                label_ids_batch = label_ids_batch.cuda()
+                attention_mask_batch = attention_mask_batch.cuda()
+                pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
+                image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+                if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                    model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
@@ -444,7 +450,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
     return avg_eval_loss
 
 
-def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
+def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0, backend=None):
     epochs = config["training"]["num_epochs"]
     lr = float(config["training"]["learning_rate"])
     accum_steps = config["training"]["gradient_accumulation_steps"]
@@ -503,7 +509,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     if resume_dir and os.path.exists(resume_dir):
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
-        if getattr(model, "qformer_enabled", False):
+        if backend is not None and backend.name == "sailvl":
+            backend.load_backend_artifacts(model, resume_dir, config)
+            logger.info("Loaded SAIL backend artifacts successfully!")
+        elif getattr(model, "qformer_enabled", False):
             load_qformer_bridge(model, resume_dir, strict=True)
             align_qformer_bridge_runtime(model)
             logger.info("Loaded Q-Former bridge states successfully!")
@@ -581,6 +590,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         for batch in progress_bar:
             i += 1
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, samples_batch = batch
+            if not samples_batch:
+                continue
             if debug_log_sample_ids:
                 logger.info(
                     "[DEBUG_SAMPLE_IDS] epoch=%s step=%s ids=%s",
@@ -596,23 +607,26 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     runtime_rng_digest(include_cuda=torch.cuda.is_available()),
                 )
 
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
-            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+            if backend is not None and backend.name == "sailvl":
+                outputs = backend.forward_train_batch(model, batch, config)
+            else:
+                input_ids_batch = input_ids_batch.cuda()
+                label_ids_batch = label_ids_batch.cuda()
+                attention_mask_batch = attention_mask_batch.cuda()
+                pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
+                image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+                if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                    model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
 
             loss = outputs.loss / accum_steps
             progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
@@ -644,7 +658,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
-                val_loss = eval_model(model, val_loader, i, epoch, epochs)
+                val_loss = eval_model(model, val_loader, i, epoch, epochs, backend=backend)
                 if val_loss is not None:
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
@@ -654,9 +668,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 os.makedirs(step_save_dir, exist_ok=True)
                 logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
 
-                model.language_model.save_pretrained(step_save_dir)
-                save_qformer_bridge(model, step_save_dir)
-                tokenizer.save_pretrained(step_save_dir)
+                if backend is not None and backend.name == "sailvl":
+                    backend.save_backend_artifacts(model, tokenizer, step_save_dir)
+                else:
+                    model.language_model.save_pretrained(step_save_dir)
+                    save_qformer_bridge(model, step_save_dir)
+                    tokenizer.save_pretrained(step_save_dir)
                 optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
                 if converted:
                     logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
@@ -675,9 +692,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
         os.makedirs(epoch_save_dir, exist_ok=True)
         logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
-        model.language_model.save_pretrained(epoch_save_dir)
-        save_qformer_bridge(model, epoch_save_dir)
-        tokenizer.save_pretrained(epoch_save_dir)
+        if backend is not None and backend.name == "sailvl":
+            backend.save_backend_artifacts(model, tokenizer, epoch_save_dir)
+        else:
+            model.language_model.save_pretrained(epoch_save_dir)
+            save_qformer_bridge(model, epoch_save_dir)
+            tokenizer.save_pretrained(epoch_save_dir)
         optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
         if converted:
             logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
@@ -704,6 +724,8 @@ if __name__ == "__main__":
     resume_dir, start_epoch, start_step = resolve_resume_config(args, config)
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
+    architecture = config["model"]["architecture"]
+    backend = get_backend(architecture) if architecture == "sailvl" else None
 
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=config["model"]["quantization"]["enabled"],
@@ -713,25 +735,29 @@ if __name__ == "__main__":
     )
 
     logger.info(f"Loading model {model_name_or_path} in 4-bit...")
-    model = AutoModel.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        low_cpu_mem_usage=True,
-        trust_remote_code=config["model"]["trust_remote_code"],
-    )
+    if backend is not None and backend.name == "sailvl":
+        model, tokenizer = backend.load_model_and_tokenizer(config, resume_dir)
+    else:
+        model = AutoModel.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+            low_cpu_mem_usage=True,
+            trust_remote_code=config["model"]["trust_remote_code"],
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
+        model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        model.system_message = SYSTEM_MESSAGE
 
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
         model.gradient_checkpointing_enable()
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
-    model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-    model.system_message = SYSTEM_MESSAGE
-
     if config["model"]["vision"]["freeze_encoder"]:
         model.vision_model.requires_grad_(False)
-    if qformer_enabled(config):
+    if backend is not None and backend.name == "sailvl":
+        backend.attach_qformer_if_enabled(model, config, logger=logger)
+    elif qformer_enabled(config):
         attach_qformer_bridge(model, config, logger=logger)
         align_qformer_bridge_runtime(model)
 
@@ -757,22 +783,27 @@ if __name__ == "__main__":
     logger.info("Building dataset...")
     train_dataset, val_dataset = build_dataset(config)
 
-    train_collate_fn = CollaterFn(tokenizer, model)
-    train_collate_fn.log_token_stats = bool(config["training"].get("log_token_stats", False))
-    train_collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
-    train_collate_fn.log_prompt_samples = bool(config["training"].get("log_prompt_samples", False))
-    train_collate_fn.prompt_log_remaining = int(config["training"].get("prompt_log_batches", 0))
-    val_collate_fn = CollaterFn(tokenizer, model)
-    val_loader_with_shuffle_collate_fn = CollaterFn(tokenizer, model)
+    if backend is not None and backend.name == "sailvl":
+        train_collate_fn = backend.build_train_collate_fn(tokenizer, model, config)
+        val_collate_fn = backend.build_eval_collate_fn(tokenizer, model, config)
+        val_loader_with_shuffle_collate_fn = backend.build_eval_collate_fn(tokenizer, model, config)
+    else:
+        train_collate_fn = CollaterFn(tokenizer, model)
+        train_collate_fn.log_token_stats = bool(config["training"].get("log_token_stats", False))
+        train_collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+        train_collate_fn.log_prompt_samples = bool(config["training"].get("log_prompt_samples", False))
+        train_collate_fn.prompt_log_remaining = int(config["training"].get("prompt_log_batches", 0))
+        val_collate_fn = CollaterFn(tokenizer, model)
+        val_loader_with_shuffle_collate_fn = CollaterFn(tokenizer, model)
 
     logger.info(
         "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s | log_prompt_samples=%s | prompt_log_batches=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "num_image_token", "unknown"),
-        train_collate_fn.log_token_stats,
-        train_collate_fn.token_log_remaining,
-        train_collate_fn.log_prompt_samples,
-        train_collate_fn.prompt_log_remaining,
+        getattr(train_collate_fn, "log_token_stats", False),
+        getattr(train_collate_fn, "token_log_remaining", 0),
+        getattr(train_collate_fn, "log_prompt_samples", False),
+        getattr(train_collate_fn, "prompt_log_remaining", 0),
     )
 
     train_sampler = build_train_sampler(train_dataset, config)
@@ -804,4 +835,5 @@ if __name__ == "__main__":
         resume_dir=resume_dir,
         start_epoch=start_epoch,
         start_step=start_step,
+        backend=backend,
     )

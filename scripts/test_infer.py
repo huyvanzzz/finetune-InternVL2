@@ -20,6 +20,7 @@ from wad_dataset import WADDatasetForInternVL
 from preprocessing import get_response_format
 from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
 from model.conversation import get_conv_template
+from model_backends import get_backend
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
@@ -162,6 +163,8 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
     response_format = get_response_format(config)
+    architecture = config["model"]["architecture"]
+    backend = get_backend(architecture) if architecture == "sailvl" else None
 
     # 1. Load Base Model & Tokenizer
     model_name_or_path = config['model']['name']
@@ -175,28 +178,35 @@ def main():
         bnb_4bit_quant_type=config['model']['quantization']['type']
     )
     # 3. Load model
-    model = AutoModel.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        device_map={"": 0},
-        low_cpu_mem_usage=True,
-        trust_remote_code=config['model']['trust_remote_code']
-    )
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
-    model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-    log_runtime_prompt_state(model, "after_load_before_override")
-    model.system_message = SYSTEM_MESSAGE
-    log_runtime_prompt_state(model, "after_override")
-    if qformer_enabled(config):
-        attach_qformer_bridge(model, config)
+    if backend is not None and backend.name == "sailvl":
+        model, tokenizer = backend.load_model_and_tokenizer(config, args.checkpoint)
+        backend.attach_qformer_if_enabled(model, config)
+        if args.checkpoint:
+            backend.load_backend_artifacts(model, args.checkpoint, config)
+            print("✓ SAIL backend artifacts loaded successfully.")
+    else:
+        model = AutoModel.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+            device_map={"": 0},
+            low_cpu_mem_usage=True,
+            trust_remote_code=config['model']['trust_remote_code']
+        )
+        
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
+        model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        log_runtime_prompt_state(model, "after_load_before_override")
+        model.system_message = SYSTEM_MESSAGE
+        log_runtime_prompt_state(model, "after_override")
+        if qformer_enabled(config):
+            attach_qformer_bridge(model, config)
     model.eval()
 
     # 2. Load Checkpoint LoRA
     if args.checkpoint:
         print(f"Loading LoRA weights from: {args.checkpoint}")
-        if qformer_enabled(config):
+        if backend is None and qformer_enabled(config):
             load_qformer_bridge(model, args.checkpoint, strict=True)
             print("✓ Q-Former bridge loaded successfully.")
         model.language_model = PeftModel.from_pretrained(
@@ -288,16 +298,19 @@ def main():
                     early_stopping=True,
                 )
                 
-                if getattr(model, "qformer_enabled", False):
-                    qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                    q_ids, q_mask = model.encode_qformer_texts(
-                        [qformer_text] * pixel_values.shape[0],
-                        device=pixel_values.device,
-                    )
-                    model.set_qformer_text(q_ids, q_mask)
-                response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
-                if getattr(model, "qformer_enabled", False):
-                    model.clear_qformer_text()
+                if backend is not None and backend.name == "sailvl":
+                    response = backend.generate_response(model, tokenizer, sample, generation_config, config)
+                else:
+                    if getattr(model, "qformer_enabled", False):
+                        qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                        q_ids, q_mask = model.encode_qformer_texts(
+                            [qformer_text] * pixel_values.shape[0],
+                            device=pixel_values.device,
+                        )
+                        model.set_qformer_text(q_ids, q_mask)
+                    response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
+                    if getattr(model, "qformer_enabled", False):
+                        model.clear_qformer_text()
                 question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
                 response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
                 ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))

@@ -1,0 +1,154 @@
+import importlib.machinery
+import json
+import sys
+from types import ModuleType, SimpleNamespace
+
+import pytest
+import torch
+
+
+if "peft" not in sys.modules:
+    peft_stub = ModuleType("peft")
+    peft_stub.__spec__ = importlib.machinery.ModuleSpec("peft", loader=None)
+    peft_stub.LoraConfig = object
+    peft_stub.PeftModel = object
+    peft_stub.get_peft_model = lambda *args, **kwargs: None
+    peft_stub.prepare_model_for_kbit_training = lambda model, *args, **kwargs: model
+    sys.modules["peft"] = peft_stub
+
+
+class DummyTokenizer:
+    def __init__(self):
+        self.saved_to = None
+
+    def encode(self, text, add_special_tokens=False):
+        return list(range(max(len(text.split()), 1)))
+
+    def convert_tokens_to_ids(self, token):
+        return 1
+
+    def save_pretrained(self, output_dir):
+        self.saved_to = output_dir
+
+
+class DummyTemplate:
+    sep = "<sep>"
+    roles = ("user", "assistant")
+    system_message = ""
+
+    def __init__(self):
+        self.messages = []
+
+    def append_message(self, role, content):
+        self.messages.append((role, content))
+
+    def get_prompt(self):
+        return "\n".join(content or "" for _, content in self.messages)
+
+
+class DummyLanguageModel:
+    def __init__(self):
+        self.saved_to = None
+
+    def save_pretrained(self, output_dir):
+        self.saved_to = output_dir
+
+    def get_input_embeddings(self):
+        return torch.nn.Embedding(32, 16)
+
+    def get_output_embeddings(self):
+        return torch.nn.Embedding(32, 16)
+
+
+class DummyModel:
+    def __init__(self):
+        self.template = "dummy"
+        self.system_message = "system"
+        self.num_image_token = 32
+        self.qformer_enabled = False
+        self.language_model = DummyLanguageModel()
+
+    def generate(self, **kwargs):
+        return torch.tensor([[1, 2, 3]])
+
+
+def test_sail_train_collate_preprocesses_from_raw_images(monkeypatch):
+    from model_backends.sailvl.runtime import build_train_collate_fn
+
+    dummy_model = DummyModel()
+    dummy_tokenizer = DummyTokenizer()
+    monkeypatch.setattr("model_backends.sailvl.runtime.get_conv_template", lambda _: DummyTemplate())
+    monkeypatch.setattr(
+        "model_backends.sailvl.runtime.preprocess_sail_image",
+        lambda image, config: torch.zeros((2, 3, 2, 2)),
+    )
+
+    collate = build_train_collate_fn(dummy_tokenizer, dummy_model, {"model": {"vision": {}}})
+    batch = [
+        {
+            "question": "<image>\nDescribe the scene.",
+            "answer": "move forward",
+            "qformer_text": "Describe the scene.",
+            "image": [object()],
+            "task_type": "alter",
+            "selected_prompt_id": "T1",
+            "selected_prompt_text": "Describe the scene.",
+            "frame_path": "video.frame",
+            "questionId": "1",
+        }
+    ]
+
+    _, _, _, pixel_values, qformer_inputs, samples = collate(batch)
+
+    assert pixel_values.shape == (2, 3, 2, 2)
+    assert qformer_inputs is None
+    assert samples[0]["questionId"] == "1"
+
+
+def test_sail_attach_qformer_if_enabled_calls_bridge(monkeypatch):
+    from model_backends.sailvl.runtime import attach_qformer_if_enabled
+
+    model = DummyModel()
+    called = {}
+
+    monkeypatch.setattr(
+        "model_backends.sailvl.runtime.attach_sail_qformer_bridge",
+        lambda model, config, logger=None: called.setdefault("attached", True) or model,
+    )
+
+    config = {"model": {"qformer": {"enabled": True}}}
+    attach_qformer_if_enabled(model, config)
+
+    assert called["attached"] is True
+
+
+def test_sail_save_backend_artifacts_saves_bridge_with_backend_marker(tmp_path, monkeypatch):
+    from model_backends.sailvl.runtime import save_backend_artifacts
+
+    model = DummyModel()
+    tokenizer = DummyTokenizer()
+    model.qformer_enabled = True
+
+    monkeypatch.setattr(
+        "model_backends.sailvl.runtime.save_sail_qformer_bridge",
+        lambda model, output_dir: (tmp_path / "qformer_bridge.safetensors").write_bytes(b"bridge"),
+    )
+
+    save_backend_artifacts(model, tokenizer, str(tmp_path))
+
+    assert model.language_model.saved_to == str(tmp_path)
+    assert tokenizer.saved_to == str(tmp_path)
+    metadata = json.loads((tmp_path / "qformer_bridge_config.json").read_text(encoding="utf-8"))
+    assert metadata["bridge_backend"] == "sailvl"
+
+
+def test_sail_load_backend_artifacts_rejects_foreign_bridge_backend(tmp_path):
+    from model_backends.sailvl.runtime import load_backend_artifacts
+
+    (tmp_path / "qformer_bridge_config.json").write_text(
+        json.dumps({"bridge_backend": "internvl"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Expected sailvl bridge backend"):
+        load_backend_artifacts(DummyModel(), str(tmp_path), {"model": {"qformer": {"enabled": True}}})
