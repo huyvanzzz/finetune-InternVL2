@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
+from types import MethodType
 from typing import Dict, Optional
 
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 from model.conversation import get_conv_template
@@ -86,6 +89,102 @@ def wrap_input_embeddings_for_safe_scatter(model):
         return wrapped
 
     language_model.get_input_embeddings = _get_input_embeddings
+
+
+def patch_sail_forward_runtime(model):
+    if getattr(model, "_safe_forward_patched", False):
+        return
+
+    def _forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        image_flags: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[list[torch.FloatTensor]] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if image_flags is None:
+            raise ValueError("image_flags is required for SailVL forward.")
+
+        image_flags_local = image_flags.squeeze(-1)
+        input_embeds = self.language_model.get_input_embeddings()(input_ids).clone()
+
+        vit_embeds = self.extract_feature(pixel_values)
+        vit_embeds = vit_embeds[image_flags_local == 1]
+        vit_batch_size = pixel_values.shape[0]
+
+        B, N, C = input_embeds.shape
+        flat_input_embeds = input_embeds.reshape(B * N, C).clone()
+
+        dist = getattr(torch, "distributed", None)
+        rank_zero = True
+        if (
+            dist is not None
+            and callable(getattr(dist, "is_available", None))
+            and callable(getattr(dist, "is_initialized", None))
+            and dist.is_available()
+            and dist.is_initialized()
+            and callable(getattr(dist, "get_rank", None))
+        ):
+            rank_zero = dist.get_rank() == 0
+        if rank_zero:
+            print(
+                f"dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}"
+            )
+
+        flat_input_ids = input_ids.reshape(B * N)
+        selected = flat_input_ids == self.img_context_token_id
+        flat_vit_embeds = vit_embeds.reshape(-1, C)
+        n_token = int(selected.sum().item())
+        if n_token > 0:
+            flat_input_embeds[selected] = flat_vit_embeds[:n_token].to(flat_input_embeds.device)
+
+        input_embeds = flat_input_embeds.reshape(B, N, C)
+
+        outputs = self.language_model(
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        logits = outputs.logits
+
+        loss = None
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.language_model.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=getattr(outputs, "past_key_values", None),
+            hidden_states=getattr(outputs, "hidden_states", None),
+            attentions=getattr(outputs, "attentions", None),
+        )
+
+    model.forward = MethodType(_forward, model)
+    model._safe_forward_patched = True
 
 
 class SailCollateFn:
@@ -176,6 +275,7 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
     model.system_message = SYSTEM_MESSAGE
     wrap_input_embeddings_for_safe_scatter(model)
+    patch_sail_forward_runtime(model)
     return model, tokenizer
 
 
@@ -192,6 +292,7 @@ def _build_image_flags(pixel_values_batch: torch.Tensor):
 
 
 def forward_train_batch(model, batch, config):
+    patch_sail_forward_runtime(model)
     input_ids_batch, label_ids_batch, _, pixel_values_batch, qformer_inputs, _ = batch
     wrap_input_embeddings_for_safe_scatter(model)
     input_ids_batch = input_ids_batch.cuda()
@@ -218,6 +319,7 @@ def forward_eval_batch(model, batch, config):
 
 
 def generate_response(model, tokenizer, sample, generation_config, config):
+    patch_sail_forward_runtime(model)
     wrap_input_embeddings_for_safe_scatter(model)
     pixel_values = preprocess_sail_image(sample["image"][0] if isinstance(sample["image"], list) else sample["image"], config)
     pixel_values = pixel_values.to(torch.bfloat16).cuda()

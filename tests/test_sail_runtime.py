@@ -292,3 +292,62 @@ def test_sail_forward_train_batch_rewraps_current_language_model(monkeypatch):
 
     assert outputs["requires_grad"] is True
     assert outputs["is_leaf"] is False
+
+
+def test_patch_sail_forward_runtime_avoids_inplace_leaf_failure(monkeypatch):
+    from model_backends.sailvl.runtime import patch_sail_forward_runtime
+
+    class TinyLanguageModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 4)
+            self.config = SimpleNamespace(vocab_size=16)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def forward(self, inputs_embeds=None, **kwargs):
+            logits = torch.randn(
+                inputs_embeds.shape[0],
+                inputs_embeds.shape[1],
+                self.config.vocab_size,
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
+                requires_grad=True,
+            )
+            return SimpleNamespace(
+                logits=logits,
+                past_key_values=None,
+                hidden_states=None,
+                attentions=None,
+            )
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = TinyLanguageModel()
+            self.img_context_token_id = 7
+            self.config = SimpleNamespace(use_return_dict=True)
+
+        def extract_feature(self, pixel_values):
+            return torch.ones((pixel_values.shape[0], 1, 4), device=pixel_values.device, dtype=pixel_values.dtype)
+
+    monkeypatch.setattr(torch, "distributed", SimpleNamespace(
+        is_available=lambda: True,
+        is_initialized=lambda: False,
+        get_rank=lambda: 0,
+    ))
+
+    model = TinyModel()
+    patch_sail_forward_runtime(model)
+
+    outputs = model(
+        pixel_values=torch.zeros((1, 3, 2, 2), dtype=torch.float32),
+        input_ids=torch.tensor([[7]], dtype=torch.long),
+        attention_mask=torch.tensor([[1]], dtype=torch.long),
+        image_flags=torch.tensor([[1]], dtype=torch.long),
+        labels=torch.tensor([[7]], dtype=torch.long),
+        return_dict=True,
+    )
+
+    assert outputs.logits.shape == (1, 1, 16)
