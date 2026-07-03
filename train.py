@@ -22,6 +22,7 @@ from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, get_cosin
 from logutil import get_logger, init_logger
 from resume_debug_tools import format_batch_sample_ids, runtime_rng_digest
 from resume_state import load_runtime_state_file, restore_full_runtime_state, save_runtime_state_file
+from training_runtime import enable_gradient_checkpointing
 
 
 def set_seed(seed=42):
@@ -750,8 +751,11 @@ if __name__ == "__main__":
         model.system_message = SYSTEM_MESSAGE
 
     model.config.use_cache = False
-    if config["training"]["gradient_checkpointing"]:
-        model.gradient_checkpointing_enable()
+    enable_gradient_checkpointing(
+        model,
+        enabled=config["training"]["gradient_checkpointing"],
+        logger=logger,
+    )
 
     if config["model"]["vision"]["freeze_encoder"]:
         model.vision_model.requires_grad_(False)
