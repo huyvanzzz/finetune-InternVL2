@@ -345,6 +345,13 @@ def build_dataset(config: Dict):
         print("✓ Using dynamic resolution for Qwen")
     elif architecture == "internvl":
         print("✓ Using fixed tile size (448, 448) for InternVL")
+    elif architecture == "sailvl":
+        image_size = config["model"]["vision"]["force_image_size"]
+        max_dynamic_patch = config["model"]["vision"].get("max_dynamic_patch")
+        print(
+            f"✓ Using native dynamic resolution for SAIL "
+            f"(force_image_size={image_size}, max_dynamic_patch={max_dynamic_patch})"
+        )
     else:
         image_size = tuple(config["model"]["vision"]["image_size"])
         print(f"✓ Using image size {image_size} for {architecture}")

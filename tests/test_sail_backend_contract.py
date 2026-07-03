@@ -159,3 +159,10 @@ def test_sail_lora_targets_follow_qwen2_naming():
         "up_proj",
         "down_proj",
     ]
+
+
+def test_sail_configs_do_not_require_internvl_image_size_key():
+    for config_path in ("sailvl_config.yaml", "sailvl_config_no_qformer.yaml"):
+        config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        assert "image_size" not in config["model"]["vision"]
+        assert config["model"]["vision"]["force_image_size"] == 448
