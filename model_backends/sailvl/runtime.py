@@ -193,6 +193,7 @@ def _build_image_flags(pixel_values_batch: torch.Tensor):
 
 def forward_train_batch(model, batch, config):
     input_ids_batch, label_ids_batch, _, pixel_values_batch, qformer_inputs, _ = batch
+    wrap_input_embeddings_for_safe_scatter(model)
     input_ids_batch = input_ids_batch.cuda()
     label_ids_batch = label_ids_batch.cuda()
     pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
@@ -217,6 +218,7 @@ def forward_eval_batch(model, batch, config):
 
 
 def generate_response(model, tokenizer, sample, generation_config, config):
+    wrap_input_embeddings_for_safe_scatter(model)
     pixel_values = preprocess_sail_image(sample["image"][0] if isinstance(sample["image"], list) else sample["image"], config)
     pixel_values = pixel_values.to(torch.bfloat16).cuda()
     question = str(sample["question"])

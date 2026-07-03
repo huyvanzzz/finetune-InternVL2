@@ -245,3 +245,50 @@ def test_wrap_input_embeddings_for_safe_scatter_is_idempotent():
     second = model.language_model.get_input_embeddings()
 
     assert first is second
+
+
+def test_sail_forward_train_batch_rewraps_current_language_model(monkeypatch):
+    from model_backends.sailvl.runtime import forward_train_batch
+
+    class TrainLanguageModel:
+        def __init__(self):
+            self.embedding = torch.nn.Embedding(8, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    class DummyDistributedReady:
+        def is_available(self):
+            return True
+
+        def is_initialized(self):
+            return True
+
+        def get_rank(self):
+            return 0
+
+    class DummyTrainModel:
+        def __init__(self):
+            self.qformer_enabled = False
+            self.language_model = TrainLanguageModel()
+
+        def __call__(self, **kwargs):
+            embeds = self.language_model.get_input_embeddings()(kwargs["input_ids"])
+            return {"is_leaf": embeds.is_leaf, "requires_grad": embeds.requires_grad}
+
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self, raising=False)
+    monkeypatch.setattr(torch, "distributed", DummyDistributedReady())
+
+    batch = (
+        torch.tensor([[1, 2]], dtype=torch.long),
+        torch.tensor([[1, 2]], dtype=torch.long),
+        None,
+        torch.zeros((1, 3, 2, 2), dtype=torch.float32),
+        None,
+        [],
+    )
+
+    outputs = forward_train_batch(DummyTrainModel(), batch, config={})
+
+    assert outputs["requires_grad"] is True
+    assert outputs["is_leaf"] is False
