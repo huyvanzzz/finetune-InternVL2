@@ -48,6 +48,19 @@ def test_no_qformer_config_exists_and_defaults_to_alter_only():
     assert config["data"]["val_task_filter"] == "alter_only"
 
 
+def test_internvl_mixed_configs_enable_verify_friendly_logging_defaults():
+    for config_name in ("internvl_config_mixed.yaml", "internvl_config_no_qformer_mixed.yaml"):
+        with open(config_name, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        assert config["training"]["log_run_summary"] is True
+        assert config["training"]["log_data_summary"] is True
+        assert config["training"]["log_token_stats"] is True
+        assert config["training"]["log_prompt_samples"] is True
+        assert config["training"]["prompt_log_batches"] == 2
+        assert config["evaluation"]["print_samples"] == 3
+
+
 def test_run_no_qformer_notebook_uses_committed_config_without_generating_it():
     notebook = json.loads(Path("run_no_qformer.ipynb").read_text(encoding="utf-8"))
     code_cells = [
@@ -57,6 +70,6 @@ def test_run_no_qformer_notebook_uses_committed_config_without_generating_it():
     ]
     notebook_source = "\n".join(code_cells)
 
-    assert 'CONFIG_PATH = "internvl_config_no_qformer.yaml"' in notebook_source
+    assert 'CONFIG_PATH = "internvl_config_no_qformer_mixed.yaml"' in notebook_source
     assert 'with open("internvl_config.yaml", "r", encoding="utf-8") as f:' not in notebook_source
     assert 'yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=False)' not in notebook_source

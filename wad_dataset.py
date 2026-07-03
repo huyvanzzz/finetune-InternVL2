@@ -82,6 +82,13 @@ def should_stratify_task_split(task_labels) -> bool:
     return len(set(task_labels)) > 1
 
 
+def should_use_stratified_split(config: Dict, task_labels) -> bool:
+    data_cfg = config.get("data", {})
+    if not data_cfg.get("stratify_split", True):
+        return False
+    return should_stratify_task_split(task_labels)
+
+
 def build_balanced_sample_weights(task_types, task_target_weights: Dict[str, float]):
     counts = Counter(task_types)
     weights = []
@@ -298,6 +305,12 @@ def build_dataset(config: Dict):
 
     response_format = get_response_format(config)
     prompt_mode = config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy")
+    print(
+        f"[DATA SUMMARY] response_format={response_format} | prompt_mode={prompt_mode} | "
+        f"train_task_filter={config['data'].get('train_task_filter', 'all')} | "
+        f"val_task_filter={config['data'].get('val_task_filter', config['data'].get('train_task_filter', 'all'))} | "
+        f"stratify_split={config['data'].get('stratify_split', True)}"
+    )
 
     print("Loading metadata...")
     metadata = load_dataset(
@@ -376,6 +389,8 @@ def build_dataset(config: Dict):
         f"  After task filter union | train={train_task_filter} | val={val_task_filter} | "
         f"QA={filtered_stats['qa']} | alter={filtered_stats['alter']}"
     )
+    if train_task_filter == "all" and val_task_filter == "all":
+        print("  Mixed setup confirmed: both QA and alter are eligible for train/val.")
     if not filtered_train_samples:
         raise ValueError(
             "Task filtering removed all training samples. "
@@ -388,10 +403,10 @@ def build_dataset(config: Dict):
         "train_size": config["data"]["train_split"],
         "random_state": config["data"]["seed"],
     }
-    if should_stratify_task_split(task_labels):
+    if should_use_stratified_split(config, task_labels):
         split_kwargs["stratify"] = task_labels
     else:
-        print("  Single-task dataset after filtering. Disabling stratified split.")
+        print("  Using plain random split without task stratification.")
 
     train_indices, val_indices = train_test_split(indices, **split_kwargs)
     train_samples = [filtered_train_samples[idx] for idx in train_indices if task_labels[idx] in train_allowed]

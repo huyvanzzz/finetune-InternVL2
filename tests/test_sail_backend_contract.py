@@ -166,3 +166,84 @@ def test_sail_configs_do_not_require_internvl_image_size_key():
         config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
         assert "image_size" not in config["model"]["vision"]
         assert config["model"]["vision"]["force_image_size"] == 448
+
+
+def test_sail_mixed_configs_enable_verify_friendly_logging_defaults():
+    for config_path in ("sailvl_config_mixed.yaml", "sailvl_config_no_qformer_mixed.yaml"):
+        config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        assert config["training"]["log_run_summary"] is True
+        assert config["training"]["log_data_summary"] is True
+        assert config["training"]["log_token_stats"] is True
+        assert config["training"]["log_prompt_samples"] is True
+        assert config["training"]["prompt_log_batches"] == 2
+        assert config["evaluation"]["print_samples"] == 3
+
+
+def test_sail_collate_supports_verify_logs_with_limited_budget(monkeypatch):
+    from model_backends.sailvl.runtime import SailCollateFn
+
+    class DummyTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return list(range(len(text.split())))
+
+        def convert_tokens_to_ids(self, token):
+            return 1
+
+    class DummyTemplate:
+        sep = "<sep>"
+        roles = ("user", "assistant")
+        system_message = ""
+
+        def __init__(self):
+            self.messages = []
+
+        def append_message(self, role, content):
+            self.messages.append((role, content))
+
+        def get_prompt(self):
+            return "\n".join(content or "" for _, content in self.messages)
+
+    class DummyModel:
+        template = "dummy"
+        system_message = "system"
+        num_image_token = 32
+        qformer_enabled = True
+        conv_template = None
+
+        def encode_qformer_texts(self, texts):
+            return (torch.zeros((len(texts), 1), dtype=torch.long), torch.ones((len(texts), 1), dtype=torch.long))
+
+    monkeypatch.setattr("model_backends.sailvl.runtime.get_conv_template", lambda _: DummyTemplate())
+    monkeypatch.setattr("model_backends.sailvl.runtime.preprocess_sail_image", lambda image, config: torch.zeros((3, 3, 2, 2)))
+    captured_logs = []
+    monkeypatch.setattr("model_backends.sailvl.runtime._log_info", lambda msg, *args: captured_logs.append(msg % args if args else msg))
+
+    collate = SailCollateFn(
+        DummyTokenizer(),
+        DummyModel(),
+        {"model": {"vision": {"force_image_size": 448, "use_thumbnail": True, "min_dynamic_patch": 1, "max_dynamic_patch": 12}}},
+    )
+    collate.log_token_stats = True
+    collate.token_log_remaining = 1
+    collate.log_prompt_samples = True
+    collate.prompt_log_remaining = 1
+
+    sample = {
+        "question": "<image>\nDescribe the scene for a visually impaired user based on this image.",
+        "answer": "move forward",
+        "image": [Image.new("RGB", (2, 2))],
+        "qformer_text": "Describe the scene for a visually impaired user based on this image.",
+        "questionId": "0",
+        "task_type": "alter",
+        "selected_prompt_id": "legacy",
+        "selected_prompt_text": "Describe the scene for a visually impaired user based on this image.",
+        "frame_path": "video.frame",
+    }
+
+    collate([sample])
+
+    joined_logs = "\n".join(captured_logs)
+    assert "[INFO] Image token stats" in joined_logs
+    assert "[PROMPT SAMPLE]" in joined_logs
+    assert collate.token_log_remaining == 0
+    assert collate.prompt_log_remaining == 0

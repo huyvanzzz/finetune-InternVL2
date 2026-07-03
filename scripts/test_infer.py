@@ -120,7 +120,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint dir hoặc HuggingFace Repo ID")
     parser.add_argument("--split", type=str, default="test_QA", choices=["test_QA", "test_alter", "val"])
     parser.add_argument("--output_file", type=str, default="results/eval_results.json")
-    parser.add_argument("--print_samples", type=int, default=5)
+    parser.add_argument("--print_samples", type=int, default=None)
     return parser.parse_args()
 
 def prepare_auxiliary_data(config):
@@ -162,9 +162,18 @@ def main():
     args.checkpoint = resolve_checkpoint_path(args.checkpoint)
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
+    if args.print_samples is None:
+        args.print_samples = int(config.get("evaluation", {}).get("print_samples", 3))
     response_format = get_response_format(config)
     architecture = config["model"]["architecture"]
     backend = get_backend(architecture) if architecture == "sailvl" else None
+    print(
+        "[EVAL SUMMARY] "
+        f"config={args.config} | backend={architecture} | split={args.split} | "
+        f"qformer_enabled={config['model'].get('qformer', {}).get('enabled')} | "
+        f"prompt_mode={config['data'].get('direct_text_alter_prompt_mode')} | "
+        f"print_samples={args.print_samples} | checkpoint={args.checkpoint or 'zero-shot'}"
+    )
 
     # 1. Load Base Model & Tokenizer
     model_name_or_path = config['model']['name']

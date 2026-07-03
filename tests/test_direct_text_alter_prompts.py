@@ -274,3 +274,33 @@ def test_collate_logs_prompt_samples_for_train_only(monkeypatch):
     assert "[PROMPT SAMPLE]" in joined_logs
     assert "selected_prompt_id=T1" in joined_logs
     assert "frame_path=video.frame" in joined_logs
+
+
+def test_collate_logs_token_stats_with_limited_budget(monkeypatch):
+    monkeypatch.setattr("train.get_conv_template", lambda _: DummyTemplate())
+    captured_logs = []
+    monkeypatch.setattr("train.logger.info", lambda msg, *args: captured_logs.append(msg % args if args else msg))
+    collate = CollaterFn(DummyTokenizer(), DummyModel())
+    collate.log_token_stats = True
+    collate.token_log_remaining = 1
+
+    batch = [
+        {
+            "question": f"<image>\n{ALTER_T1_PROMPT}",
+            "answer": "move forward",
+            "pixel_values": [torch.zeros((1, 3, 2, 2))],
+            "qformer_text": ALTER_T1_PROMPT,
+            "questionId": "0",
+            "task_type": "alter",
+            "selected_prompt_id": "T1",
+            "selected_prompt_text": ALTER_T1_PROMPT,
+            "frame_path": "video.frame",
+        }
+    ]
+
+    collate(batch)
+
+    joined_logs = "\n".join(captured_logs)
+    assert "[INFO] Image token stats" in joined_logs
+    assert "[INFO] Text tokens - input:" in joined_logs
+    assert collate.token_log_remaining == 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import contextmanager
 from types import MethodType
@@ -31,6 +32,15 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+def _log_info(msg, *args):
+    logger = logging.getLogger("MyLogger")
+    if logger.handlers:
+        logger.info(msg, *args)
+        return
+    rendered = msg % args if args else msg
+    print(rendered)
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -192,6 +202,10 @@ class SailCollateFn:
         self.tokenizer = tokenizer
         self.model = model
         self.config = config
+        self.log_token_stats = False
+        self.token_log_remaining = 0
+        self.log_prompt_samples = False
+        self.prompt_log_remaining = 0
 
     def __call__(self, batch):
         batch = [sample for sample in batch if sample is not None]
@@ -227,6 +241,24 @@ class SailCollateFn:
 
             input_ids = self.tokenizer.encode(query, add_special_tokens=False)
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
+            if self.log_token_stats and self.token_log_remaining != 0:
+                total_image_tokens_in_sample = num_patches * self.model.num_image_token
+                total_sequence_length = len(input_ids) + len(answer_ids) + 1
+                _log_info(
+                    "[INFO] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    1,
+                    [num_patches],
+                    self.model.num_image_token,
+                    total_image_tokens_in_sample,
+                )
+                _log_info(
+                    "[INFO] Text tokens - input: %s, answer: %s, total: %s",
+                    len(input_ids),
+                    len(answer_ids),
+                    total_sequence_length,
+                )
+                if self.token_log_remaining > 0:
+                    self.token_log_remaining -= 1
             label_ids = [-100] * len(input_ids) + answer_ids + [eos_token_id]
             input_ids = input_ids + answer_ids + [eos_token_id]
             attention_mask = [1] * len(input_ids)
@@ -245,6 +277,27 @@ class SailCollateFn:
         qformer_inputs = None
         if getattr(self.model, "qformer_enabled", False):
             qformer_inputs = self.model.encode_qformer_texts(qformer_texts)
+        if self.log_prompt_samples and self.prompt_log_remaining != 0:
+            for sample in samples_batch:
+                if sample.get("task_type") != "alter":
+                    continue
+                _log_info(
+                    "[PROMPT SAMPLE] questionId=%s | frame_path=%s | task_type=%s | selected_prompt_id=%s\n"
+                    "selected_prompt_text:\n%s\n"
+                    "question:\n%s\n"
+                    "qformer_text:\n%s\n"
+                    "answer:\n%s",
+                    sample.get("questionId"),
+                    sample.get("frame_path"),
+                    sample.get("task_type"),
+                    sample.get("selected_prompt_id"),
+                    sample.get("selected_prompt_text"),
+                    sample.get("question"),
+                    sample.get("qformer_text"),
+                    sample.get("answer"),
+                )
+            if self.prompt_log_remaining > 0:
+                self.prompt_log_remaining -= 1
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
 
 

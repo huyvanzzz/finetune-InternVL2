@@ -7,6 +7,7 @@ import datetime
 import re
 import random
 import sys
+from collections import Counter
 
 import numpy as np
 import torch
@@ -375,6 +376,56 @@ def build_train_sampler(train_dataset, config):
         num_samples=len(sample_weights),
         replacement=True,
     )
+
+
+def log_run_summary(config, output_dir, backend_name, train_collate_fn=None):
+    training_cfg = config["training"]
+    data_cfg = config["data"]
+    model_cfg = config["model"]
+    logger.info(
+        "[RUN SUMMARY] backend=%s | config=%s | output_dir=%s | qformer_enabled=%s | "
+        "train_task_filter=%s | val_task_filter=%s | prompt_mode=%s | stratify_split=%s | "
+        "task_balancing=%s | response_format=%s",
+        backend_name,
+        CONFIG_PATH,
+        output_dir,
+        model_cfg.get("qformer", {}).get("enabled"),
+        data_cfg.get("train_task_filter"),
+        data_cfg.get("val_task_filter"),
+        data_cfg.get("direct_text_alter_prompt_mode"),
+        data_cfg.get("stratify_split", True),
+        training_cfg.get("task_balancing", {}).get("enabled", False),
+        data_cfg.get("response_format"),
+    )
+    if train_collate_fn is not None:
+        logger.info(
+            "[VERIFY POLICY] log_run_summary=%s | log_data_summary=%s | log_token_stats=%s | token_log_batches=%s | "
+            "log_prompt_samples=%s | prompt_log_batches=%s",
+            bool(training_cfg.get("log_run_summary", False)),
+            bool(training_cfg.get("log_data_summary", False)),
+            getattr(train_collate_fn, "log_token_stats", False),
+            getattr(train_collate_fn, "token_log_remaining", 0),
+            getattr(train_collate_fn, "log_prompt_samples", False),
+            getattr(train_collate_fn, "prompt_log_remaining", 0),
+        )
+
+
+def log_dataset_verify_summary(train_dataset, val_dataset):
+    train_counts = Counter(getattr(train_dataset, "task_types", []))
+    val_counts = Counter(getattr(val_dataset, "task_types", []))
+    logger.info(
+        "[DATA VERIFY] train_total=%s | train_qa=%s | train_alter=%s | val_total=%s | val_qa=%s | val_alter=%s",
+        len(train_dataset),
+        train_counts.get("qa", 0),
+        train_counts.get("alter", 0),
+        len(val_dataset),
+        val_counts.get("qa", 0),
+        val_counts.get("alter", 0),
+    )
+    if train_counts.get("qa", 0) and train_counts.get("alter", 0):
+        logger.info("[DATA VERIFY] mixed setup confirmed for training split.")
+    if val_counts.get("qa", 0) and val_counts.get("alter", 0):
+        logger.info("[DATA VERIFY] mixed setup confirmed for validation split.")
 
 
 def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
@@ -800,6 +851,15 @@ if __name__ == "__main__":
         val_collate_fn = CollaterFn(tokenizer, model)
         val_loader_with_shuffle_collate_fn = CollaterFn(tokenizer, model)
 
+    if hasattr(train_collate_fn, "log_token_stats"):
+        train_collate_fn.log_token_stats = bool(config["training"].get("log_token_stats", False))
+    if hasattr(train_collate_fn, "token_log_remaining"):
+        train_collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    if hasattr(train_collate_fn, "log_prompt_samples"):
+        train_collate_fn.log_prompt_samples = bool(config["training"].get("log_prompt_samples", False))
+    if hasattr(train_collate_fn, "prompt_log_remaining"):
+        train_collate_fn.prompt_log_remaining = int(config["training"].get("prompt_log_batches", 0))
+
     logger.info(
         "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s | log_prompt_samples=%s | prompt_log_batches=%s",
         getattr(model, "qformer_enabled", False),
@@ -809,6 +869,10 @@ if __name__ == "__main__":
         getattr(train_collate_fn, "log_prompt_samples", False),
         getattr(train_collate_fn, "prompt_log_remaining", 0),
     )
+    if config["training"].get("log_run_summary", False):
+        log_run_summary(config, output_dir, backend.name if backend is not None else architecture, train_collate_fn)
+    if config["training"].get("log_data_summary", False):
+        log_dataset_verify_summary(train_dataset, val_dataset)
 
     train_sampler = build_train_sampler(train_dataset, config)
     train_loader = DataLoader(
