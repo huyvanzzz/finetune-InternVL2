@@ -225,6 +225,20 @@ def count_optimizer_state_tensors_on_cpu(optimizer):
     return count
 
 
+def count_optimizer_state_device_mismatches(optimizer):
+    count = 0
+    for param, param_state in optimizer.state.items():
+        if not isinstance(param_state, dict):
+            continue
+        param_device = getattr(param, "device", None)
+        if param_device is None:
+            continue
+        for value in param_state.values():
+            if torch.is_tensor(value) and value.device != param_device:
+                count += 1
+    return count
+
+
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -573,12 +587,15 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         sch_path = os.path.join(resume_dir, "scheduler.pt")
 
         if os.path.exists(opt_path) and os.path.exists(sch_path):
+            if backend is not None and backend.name == "sailvl":
+                backend.prepare_model_for_training(model, logger=logger)
             optimizer_state_dict, converted, overridden_groups = sanitize_optimizer_state_dict(
                 torch.load(opt_path, map_location="cpu")
             )
             optimizer.load_state_dict(optimizer_state_dict)
             overridden_groups_after_load = enforce_safe_optimizer_param_groups(optimizer)
             moved = move_optimizer_state_to_param_device(optimizer)
+            mismatches_after_move = count_optimizer_state_device_mismatches(optimizer)
             lr_scheduler.load_state_dict(torch.load(sch_path))
             if converted:
                 logger.info("Sanitized %s optimizer state tensors to float32 after load.", converted)
@@ -590,6 +607,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 logger.info("Moved %s optimizer state tensors to parameter devices after load.", moved)
             remaining_cpu_tensors = count_optimizer_state_tensors_on_cpu(optimizer)
             logger.info("Optimizer state CPU tensor count after load: %s", remaining_cpu_tensors)
+            logger.info("Optimizer state device mismatch count after load: %s", mismatches_after_move)
             logger.info("Loaded Optimizer and Scheduler states successfully!")
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
@@ -697,6 +715,14 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     save_metrics(metrics)
                 accumulated_loss_for_log = 0.0
 
+                moved_before_step = move_optimizer_state_to_param_device(optimizer)
+                mismatches_before_step = count_optimizer_state_device_mismatches(optimizer)
+                if moved_before_step:
+                    logger.info("Moved %s optimizer state tensors to parameter devices before optimizer.step().", moved_before_step)
+                if mismatches_before_step:
+                    raise RuntimeError(
+                        f"Optimizer state still has {mismatches_before_step} device mismatches before optimizer.step()."
+                    )
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -831,6 +857,9 @@ if __name__ == "__main__":
         )
     else:
         model.language_model = build_fresh_lora_model(model.language_model, config, logger)
+
+    if backend is not None and backend.name == "sailvl":
+        backend.prepare_model_for_training(model, logger=logger)
 
     model.language_model.print_trainable_parameters()
     model.train()

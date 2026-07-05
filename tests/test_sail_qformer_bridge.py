@@ -160,3 +160,43 @@ def test_sail_qformer_bridge_extract_feature_runs_end_to_end(monkeypatch):
     model.clear_qformer_text()
 
     assert features.shape == (2, 32, 12)
+
+
+def test_align_sail_qformer_bridge_runtime_uses_language_model_device(monkeypatch):
+    from model_backends.sailvl.qformer_bridge import align_sail_qformer_bridge_runtime, attach_sail_qformer_bridge
+
+    dummy_qformer = DummyQFormer(hidden_size=8)
+    query_tokens = torch.nn.Parameter(torch.zeros((1, 32, 8)))
+    dummy_tokenizer = DummyTokenizer()
+    dummy_blip_config = SimpleNamespace(
+        qformer_config=SimpleNamespace(hidden_size=8, encoder_hidden_size=64),
+    )
+
+    monkeypatch.setattr(
+        "model_backends.sailvl.qformer_bridge._load_qformer_from_source",
+        lambda source_model, cache_dir: (dummy_qformer, query_tokens, dummy_tokenizer, dummy_blip_config),
+    )
+
+    model = DummyModel()
+    model.language_model = torch.nn.Linear(12, 12)
+    config = {
+        "model": {
+            "qformer": {
+                "enabled": True,
+                "source_model": "Salesforce/instructblip-flan-t5-xl",
+                "cache_dir": "./qformer_cache",
+                "num_query_tokens": 32,
+                "freeze_qformer": True,
+                "freeze_mlp1": True,
+                "prompt_aware": True,
+                "max_text_length": 128,
+            }
+        }
+    }
+
+    attach_sail_qformer_bridge(model, config)
+    device = align_sail_qformer_bridge_runtime(model)
+
+    assert str(device) == "cpu"
+    assert next(model.qformer_input_proj.parameters()).device.type == "cpu"
+    assert next(model.qformer_to_mlp1_proj.parameters()).device.type == "cpu"

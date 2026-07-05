@@ -22,6 +22,24 @@ BRIDGE_WEIGHTS_NAME = "qformer_bridge.safetensors"
 BRIDGE_CONFIG_NAME = "qformer_bridge_config.json"
 
 
+def _infer_runtime_device_and_dtype(model):
+    for module_name in ("language_model", "vision_model"):
+        module = getattr(model, module_name, None)
+        if module is None:
+            continue
+        try:
+            first_param = next(module.parameters())
+        except StopIteration:
+            continue
+        return first_param.device, first_param.dtype
+
+    try:
+        first_param = next(model.parameters())
+        return first_param.device, first_param.dtype
+    except StopIteration:
+        return torch.device("cpu"), torch.float32
+
+
 def _ensure_bridge_device(model, reference: torch.Tensor):
     device = reference.device
     reference_dtype = reference.dtype
@@ -36,6 +54,16 @@ def _ensure_bridge_device(model, reference: torch.Tensor):
             module.to(device=device, dtype=torch.float32)
 
     model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=reference_dtype)
+
+
+def align_sail_qformer_bridge_runtime(model):
+    if not getattr(model, "qformer_enabled", False):
+        return None
+
+    device, reference_dtype = _infer_runtime_device_and_dtype(model)
+    bridge_reference = torch.empty(1, device=device, dtype=reference_dtype)
+    _ensure_bridge_device(model, bridge_reference)
+    return device
 
 
 def _extract_vit_tokens_sail(model, pixel_values):
@@ -226,6 +254,7 @@ def write_sail_bridge_metadata(output_dir: str, extra: Dict | None = None):
 __all__ = [
     "BRIDGE_WEIGHTS_NAME",
     "BRIDGE_CONFIG_NAME",
+    "align_sail_qformer_bridge_runtime",
     "attach_sail_qformer_bridge",
     "save_sail_qformer_bridge",
     "load_sail_qformer_bridge",

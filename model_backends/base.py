@@ -15,6 +15,7 @@ class BackendSpec:
     forward_eval_batch: Callable
     generate_response: Callable
     attach_qformer_if_enabled: Callable
+    prepare_model_for_training: Callable
     save_backend_artifacts: Callable
     load_backend_artifacts: Callable
 
@@ -39,6 +40,7 @@ def get_backend(architecture: str) -> BackendSpec:
         forward_eval_batch=module.forward_eval_batch,
         generate_response=module.generate_response,
         attach_qformer_if_enabled=module.attach_qformer_if_enabled,
+        prepare_model_for_training=getattr(module, "prepare_model_for_training", lambda model, logger=None: None),
         save_backend_artifacts=module.save_backend_artifacts,
         load_backend_artifacts=module.load_backend_artifacts,
     )

@@ -14,12 +14,14 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
+from checkpoint_metadata import sanitize_peft_checkpoint_metadata
 from model.conversation import get_conv_template
 from qformer_bridge import qformer_enabled
 
 from .preprocess import preprocess_sail_image
 from .qformer_bridge import (
     BRIDGE_CONFIG_NAME,
+    align_sail_qformer_bridge_runtime,
     attach_sail_qformer_bridge,
     load_sail_qformer_bridge,
     save_sail_qformer_bridge,
@@ -394,9 +396,22 @@ def attach_qformer_if_enabled(model, config, logger=None):
     return attach_sail_qformer_bridge(model, config, logger=logger)
 
 
+def prepare_model_for_training(model, logger=None):
+    wrap_input_embeddings_for_safe_scatter(model)
+    patch_sail_forward_runtime(model)
+    aligned_device = align_sail_qformer_bridge_runtime(model)
+    if logger is not None and aligned_device is not None:
+        logger.info("Aligned SAIL Q-Former bridge trainable modules to device: %s", aligned_device)
+    return aligned_device
+
+
 def save_backend_artifacts(model, tokenizer, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     model.language_model.save_pretrained(output_dir)
+    sanitize_peft_checkpoint_metadata(
+        output_dir,
+        getattr(model, "peft_base_model_name_or_path", None),
+    )
     tokenizer.save_pretrained(output_dir)
     if getattr(model, "qformer_enabled", False):
         save_sail_qformer_bridge(model, output_dir)

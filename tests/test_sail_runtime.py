@@ -122,6 +122,23 @@ def test_sail_attach_qformer_if_enabled_calls_bridge(monkeypatch):
     assert called["attached"] is True
 
 
+def test_prepare_model_for_training_aligns_qformer_bridge(monkeypatch):
+    from model_backends.sailvl.runtime import prepare_model_for_training
+
+    model = DummyModel()
+    model.qformer_enabled = True
+    calls = {}
+
+    monkeypatch.setattr(
+        "model_backends.sailvl.runtime.align_sail_qformer_bridge_runtime",
+        lambda current_model: calls.setdefault("aligned", current_model) or torch.device("cpu"),
+    )
+
+    prepare_model_for_training(model)
+
+    assert calls["aligned"] is model
+
+
 def test_sail_save_backend_artifacts_saves_bridge_with_backend_marker(tmp_path, monkeypatch):
     from model_backends.sailvl.runtime import save_backend_artifacts
 
