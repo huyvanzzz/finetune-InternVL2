@@ -34,7 +34,7 @@ QA_DIRECT_TEXT_CURRENT_PROMPT_TEMPLATE = (
 )
 
 QA_DIRECT_TEXT_779_PROMPT_TEMPLATE = (
-    "Describe the scene for a visually impaired user based on this frame.\n"
+    "Describe the scene for a visually impaired user based on the final frame.\n"
     "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
     "Question: {question}\n"
     "Answer the question directly in natural language."

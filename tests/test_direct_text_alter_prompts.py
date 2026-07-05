@@ -29,7 +29,7 @@ ALTER_779_PROMPT = (
 )
 
 QA_779_PROMPT = (
-    "Describe the scene for a visually impaired user based on this frame.\n"
+    "Describe the scene for a visually impaired user based on the final frame.\n"
     "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
     "Question: current road condition\n"
     "Answer the question directly in natural language."

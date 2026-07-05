@@ -288,6 +288,8 @@ def main():
         split='test',
         response_format=response_format,
         direct_text_alter_prompt_mode=config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy"),
+        direct_text_qa_prompt_mode=config["data"].get("direct_text_qa_prompt_mode", "current_v1"),
+        non_train_error_policy=config["data"].get("non_train_error_policy", "skip"),
         seed=config["data"].get("seed", 42),
     )
     
