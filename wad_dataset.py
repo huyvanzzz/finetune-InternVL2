@@ -21,6 +21,25 @@ ALTER_DIRECT_TEXT_LEGACY_PROMPT = (
     "Provide only the final spoken guidance in natural language."
 )
 
+ALTER_DIRECT_TEXT_779_PROMPT = (
+    "Describe the scene for a visually impaired user based on the final frame.\n"
+    "Focus on immediate obstacles, safe direction, and what action the user should take.\n"
+    "Provide only the final spoken guidance in natural language."
+)
+
+QA_DIRECT_TEXT_CURRENT_PROMPT_TEMPLATE = (
+    "Describe the scene for a visually impaired user based on this frame.\n"
+    "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
+    "Question: {question}"
+)
+
+QA_DIRECT_TEXT_779_PROMPT_TEMPLATE = (
+    "Describe the scene for a visually impaired user based on this frame.\n"
+    "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
+    "Question: {question}\n"
+    "Answer the question directly in natural language."
+)
+
 ALTER_DIRECT_TEXT_TEMPLATES = {
     "T1": (
         "Provide brief navigation guidance for a visually impaired user based on this image.\n"
@@ -120,6 +139,8 @@ def get_direct_text_alter_prompt_text(prompt_mode: str, split: str, prompt_id: s
     normalized_split = str(split or "train").strip().lower()
     if normalized_mode == "fixed_legacy":
         return "legacy", ALTER_DIRECT_TEXT_LEGACY_PROMPT
+    if normalized_mode == "fixed_779":
+        return "legacy_779", ALTER_DIRECT_TEXT_779_PROMPT
     if normalized_mode == "fixed_v1":
         return "T1", ALTER_DIRECT_TEXT_TEMPLATES["T1"]
     if normalized_mode == "balanced_v1":
@@ -132,6 +153,15 @@ def get_direct_text_alter_prompt_text(prompt_mode: str, split: str, prompt_id: s
     raise ValueError(f"Unsupported direct_text alter prompt mode: {prompt_mode}")
 
 
+def get_direct_text_qa_prompt_text(prompt_mode: str, question: str):
+    normalized_mode = str(prompt_mode or "current_v1").strip().lower()
+    if normalized_mode == "current_v1":
+        return "qa_default", QA_DIRECT_TEXT_CURRENT_PROMPT_TEMPLATE.format(question=question)
+    if normalized_mode == "legacy_779":
+        return "qa_legacy_779", QA_DIRECT_TEXT_779_PROMPT_TEMPLATE.format(question=question)
+    raise ValueError(f"Unsupported direct_text QA prompt mode: {prompt_mode}")
+
+
 class WADDatasetForInternVL(Dataset):
     def __init__(
         self,
@@ -141,6 +171,8 @@ class WADDatasetForInternVL(Dataset):
         split: str = "train",
         response_format: str = "structured_json",
         direct_text_alter_prompt_mode: str = "fixed_legacy",
+        direct_text_qa_prompt_mode: str = "current_v1",
+        non_train_error_policy: str = "skip",
         seed: int = 42,
     ):
         self.metadata = metadata_dataset[split]
@@ -149,6 +181,8 @@ class WADDatasetForInternVL(Dataset):
         self.split = split
         self.response_format = response_format
         self.direct_text_alter_prompt_mode = direct_text_alter_prompt_mode
+        self.direct_text_qa_prompt_mode = direct_text_qa_prompt_mode
+        self.non_train_error_policy = str(non_train_error_policy or "skip").strip().lower()
         self.seed = int(seed)
         self.prompt_templates = get_direct_text_alter_prompt_templates()
         self.prompt_assignment = {}
@@ -216,12 +250,10 @@ class WADDatasetForInternVL(Dataset):
     def _get_selected_direct_text_prompt(self, idx: int, sample: Dict):
         task_type = get_sample_task_type(sample)
         if task_type == "qa":
-            qa_prompt = (
-            "Describe the scene for a visually impaired user based on this frame.\n"
-            "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
-            f"Question: {sample['QA']['Q']}"
+            return get_direct_text_qa_prompt_text(
+                self.direct_text_qa_prompt_mode,
+                sample["QA"]["Q"],
             )
-            return "qa_default", qa_prompt
 
         prompt_id = None
         if self.direct_text_alter_prompt_mode == "balanced_v1" and self.split == "train":
@@ -288,7 +320,7 @@ Follow Chain-of-Thought reasoning:
             except Exception:
                 pass
 
-            if self.split in ("test", "val"):
+            if self.split in ("test", "val") and self.non_train_error_policy == "skip":
                 print(
                     f"[DATA ERROR][{self.split}] idx={idx} | frame_path={frame_path} | "
                     f"error={type(e).__name__}: {e}"
@@ -306,8 +338,11 @@ def build_dataset(config: Dict):
 
     response_format = get_response_format(config)
     prompt_mode = config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy")
+    qa_prompt_mode = config["data"].get("direct_text_qa_prompt_mode", "current_v1")
+    non_train_error_policy = config["data"].get("non_train_error_policy", "skip")
     print(
         f"[DATA SUMMARY] response_format={response_format} | prompt_mode={prompt_mode} | "
+        f"qa_prompt_mode={qa_prompt_mode} | non_train_error_policy={non_train_error_policy} | "
         f"train_task_filter={config['data'].get('train_task_filter', 'all')} | "
         f"val_task_filter={config['data'].get('val_task_filter', config['data'].get('train_task_filter', 'all'))} | "
         f"stratify_split={config['data'].get('stratify_split', True)}"
@@ -442,6 +477,8 @@ def build_dataset(config: Dict):
         split="train",
         response_format=response_format,
         direct_text_alter_prompt_mode=prompt_mode,
+        direct_text_qa_prompt_mode=qa_prompt_mode,
+        non_train_error_policy=non_train_error_policy,
         seed=config["data"]["seed"],
     )
     train_dataset.task_types = [get_sample_task_type(sample) for sample in train_samples]
@@ -453,6 +490,8 @@ def build_dataset(config: Dict):
         split="val",
         response_format=response_format,
         direct_text_alter_prompt_mode=prompt_mode,
+        direct_text_qa_prompt_mode=qa_prompt_mode,
+        non_train_error_policy=non_train_error_policy,
         seed=config["data"]["seed"],
     )
     val_dataset.task_types = [get_sample_task_type(sample) for sample in val_samples]

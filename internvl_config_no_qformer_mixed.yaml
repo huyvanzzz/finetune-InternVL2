@@ -50,7 +50,9 @@ data:
   stratify_split: false
   eval_limit: 0
   response_format: "direct_text"
-  direct_text_alter_prompt_mode: "fixed_legacy"
+  direct_text_alter_prompt_mode: "fixed_779"
+  direct_text_qa_prompt_mode: "legacy_779"
+  non_train_error_policy: "resample"
 
 training:
   output_dir: "./outputs/internvl3_2b_no_qformer_mixed"
@@ -80,6 +82,7 @@ training:
   resume_dir: null
   start_epoch: 0
   start_step: 0
+  resume_runtime_mode: "legacy_skip_only"
   log_run_summary: true
   log_data_summary: true
   log_token_stats: true

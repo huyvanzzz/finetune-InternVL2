@@ -12,6 +12,7 @@ from collections import Counter
 import numpy as np
 import torch
 import yaml
+from checkpoint_metadata import sanitize_peft_checkpoint_metadata
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
@@ -139,6 +140,15 @@ def resolve_resume_config(args, config):
         start_step = inferred_step if inferred_step is not None else 0
 
     return checkpoint, int(start_epoch or 0), int(start_step or 0)
+
+
+def should_restore_runtime_state(config):
+    mode = str(config.get("training", {}).get("resume_runtime_mode", "restore_runtime_state")).strip().lower()
+    if mode == "restore_runtime_state":
+        return True
+    if mode == "legacy_skip_only":
+        return False
+    raise ValueError(f"Unsupported training.resume_runtime_mode: {mode}")
 
 
 def build_fresh_lora_model(language_model, config, logger):
@@ -573,6 +583,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         num_training_steps=total_training_steps,
     )
 
+    restore_runtime_state_on_resume = should_restore_runtime_state(config)
+
     if resume_dir and os.path.exists(resume_dir):
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
         if backend is not None and backend.name == "sailvl":
@@ -612,9 +624,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         else:
             logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
 
-        pending_runtime_state = load_runtime_state_file(resume_dir)
+        if restore_runtime_state_on_resume:
+            pending_runtime_state = load_runtime_state_file(resume_dir)
         if pending_runtime_state is None:
-            logger.warning("No runtime_state.pt found in checkpoint. Resume will keep old seed+skip behavior only.")
+            if restore_runtime_state_on_resume:
+                logger.warning("No runtime_state.pt found in checkpoint. Resume will keep old seed+skip behavior only.")
+            else:
+                logger.info("Resume runtime mode is legacy_skip_only. Skipping runtime_state restore by config.")
         else:
             logger.info("Loaded runtime_state.pt from checkpoint.")
 
@@ -644,7 +660,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                         epoch + 1,
                         format_batch_sample_ids(skipped_batch[-1]),
                     )
-            if pending_runtime_state is not None:
+            if restore_runtime_state_on_resume and pending_runtime_state is not None:
                 restore_full_runtime_state(pending_runtime_state)
                 logger.info(
                     "[DEBUG_RNG] epoch=%s stage=restored_runtime_state digest=%s",
@@ -750,6 +766,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     backend.save_backend_artifacts(model, tokenizer, step_save_dir)
                 else:
                     model.language_model.save_pretrained(step_save_dir)
+                    sanitize_peft_checkpoint_metadata(
+                        step_save_dir,
+                        getattr(model, "peft_base_model_name_or_path", model_name_or_path),
+                        logger=logger,
+                    )
                     save_qformer_bridge(model, step_save_dir)
                     tokenizer.save_pretrained(step_save_dir)
                 optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
@@ -759,13 +780,14 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                     logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
                 torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
                 torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
-                runtime_state = save_runtime_state_file(step_save_dir, include_cuda=torch.cuda.is_available())
-                logger.info(
-                    "[DEBUG_RNG] epoch=%s step=%s stage=saved_runtime_state digest=%s",
-                    epoch + 1,
-                    i,
-                    runtime_rng_digest(include_cuda=torch.cuda.is_available()),
-                )
+                if should_restore_runtime_state(config):
+                    runtime_state = save_runtime_state_file(step_save_dir, include_cuda=torch.cuda.is_available())
+                    logger.info(
+                        "[DEBUG_RNG] epoch=%s step=%s stage=saved_runtime_state digest=%s",
+                        epoch + 1,
+                        i,
+                        runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+                    )
 
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
         os.makedirs(epoch_save_dir, exist_ok=True)
@@ -774,6 +796,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             backend.save_backend_artifacts(model, tokenizer, epoch_save_dir)
         else:
             model.language_model.save_pretrained(epoch_save_dir)
+            sanitize_peft_checkpoint_metadata(
+                epoch_save_dir,
+                getattr(model, "peft_base_model_name_or_path", model_name_or_path),
+                logger=logger,
+            )
             save_qformer_bridge(model, epoch_save_dir)
             tokenizer.save_pretrained(epoch_save_dir)
         optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
@@ -783,12 +810,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
         torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
         torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
-        save_runtime_state_file(epoch_save_dir, include_cuda=torch.cuda.is_available())
-        logger.info(
-            "[DEBUG_RNG] epoch=%s stage=saved_runtime_state_epoch digest=%s",
-            epoch + 1,
-            runtime_rng_digest(include_cuda=torch.cuda.is_available()),
-        )
+        if should_restore_runtime_state(config):
+            save_runtime_state_file(epoch_save_dir, include_cuda=torch.cuda.is_available())
+            logger.info(
+                "[DEBUG_RNG] epoch=%s stage=saved_runtime_state_epoch digest=%s",
+                epoch + 1,
+                runtime_rng_digest(include_cuda=torch.cuda.is_available()),
+            )
 
         epoch_train = [e["loss"] for e in metrics["train_loss"] if e["epoch"] == epoch + 1]
         avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
@@ -857,6 +885,8 @@ if __name__ == "__main__":
         )
     else:
         model.language_model = build_fresh_lora_model(model.language_model, config, logger)
+
+    model.peft_base_model_name_or_path = config["model"].get("base_model_name_or_path", model_name_or_path)
 
     if backend is not None and backend.name == "sailvl":
         backend.prepare_model_for_training(model, logger=logger)

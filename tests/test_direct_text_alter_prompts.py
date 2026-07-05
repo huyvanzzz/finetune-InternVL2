@@ -22,10 +22,17 @@ from train import CollaterFn
 from wad_dataset import WADDatasetForInternVL, build_dataset
 
 
-ALTER_LEGACY_PROMPT = (
-    "Describe the scene for a visually impaired user based on this image.\n"
+ALTER_779_PROMPT = (
+    "Describe the scene for a visually impaired user based on the final frame.\n"
     "Focus on immediate obstacles, safe direction, and what action the user should take.\n"
     "Provide only the final spoken guidance in natural language."
+)
+
+QA_779_PROMPT = (
+    "Describe the scene for a visually impaired user based on this frame.\n"
+    "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
+    "Question: current road condition\n"
+    "Answer the question directly in natural language."
 )
 
 ALTER_T1_PROMPT = (
@@ -55,6 +62,8 @@ def make_dataset(
     split="train",
     response_format="direct_text",
     prompt_mode="fixed_legacy",
+    qa_prompt_mode="current_v1",
+    non_train_error_policy="skip",
     samples=None,
 ):
     samples = samples or [make_sample()]
@@ -65,6 +74,8 @@ def make_dataset(
         split=split,
         response_format=response_format,
         direct_text_alter_prompt_mode=prompt_mode,
+        direct_text_qa_prompt_mode=qa_prompt_mode,
+        non_train_error_policy=non_train_error_policy,
         seed=42,
     )
     monkeypatch.setattr(dataset, "_select_frames_safe", lambda frame_path: [0])
@@ -73,15 +84,15 @@ def make_dataset(
     return dataset
 
 
-def test_fixed_legacy_mode_keeps_original_alter_prompt(monkeypatch):
-    dataset = make_dataset(monkeypatch, prompt_mode="fixed_legacy")
+def test_fixed_779_mode_keeps_original_alter_prompt(monkeypatch):
+    dataset = make_dataset(monkeypatch, prompt_mode="fixed_779")
 
     sample = dataset[0]
 
-    assert sample["selected_prompt_id"] == "legacy"
-    assert sample["selected_prompt_text"] == ALTER_LEGACY_PROMPT
-    assert sample["question"] == f"<image>\n{ALTER_LEGACY_PROMPT}"
-    assert sample["qformer_text"] == ALTER_LEGACY_PROMPT
+    assert sample["selected_prompt_id"] == "legacy_779"
+    assert sample["selected_prompt_text"] == ALTER_779_PROMPT
+    assert sample["question"] == f"<image>\n{ALTER_779_PROMPT}"
+    assert sample["qformer_text"] == ALTER_779_PROMPT
 
 
 def test_fixed_v1_mode_uses_t1_for_alter(monkeypatch):
@@ -139,9 +150,24 @@ def test_qa_direct_text_prompt_stays_unchanged(monkeypatch):
     assert sample["task_type"] == "qa"
     assert sample["selected_prompt_id"] == "qa_default"
     assert sample["qformer_text"] == (
-        "Based on this image, answer the following question for a visually impaired user directly in natural language.\n"
+        "Describe the scene for a visually impaired user based on this frame.\n"
+        "Focus on obstacles, nearby people or vehicles, free walking space, direction, and safety.\n"
         "Question: current road condition"
     )
+
+
+def test_qa_legacy_779_mode_restores_old_prompt_suffix(monkeypatch):
+    qa_dataset = make_dataset(
+        monkeypatch,
+        samples=[make_sample(qa={"Q": "current road condition", "A": "clear"})],
+        qa_prompt_mode="legacy_779",
+    )
+
+    sample = qa_dataset[0]
+
+    assert sample["selected_prompt_id"] == "qa_legacy_779"
+    assert sample["qformer_text"] == QA_779_PROMPT
+    assert sample["question"] == f"<image>\n{QA_779_PROMPT}"
 
 
 def test_structured_json_path_is_unchanged(monkeypatch):
@@ -164,6 +190,44 @@ def test_alter_direct_text_sample_exposes_prompt_debug_fields(monkeypatch):
     assert sample["selected_prompt_id"] in {"T1", "T2", "T3", "T4"}
     assert sample["selected_prompt_text"]
     assert sample["frame_path"] == "video.frame"
+
+
+def test_val_skip_policy_returns_none_on_data_error(monkeypatch):
+    dataset = make_dataset(monkeypatch, split="val", non_train_error_policy="skip")
+    monkeypatch.setattr(dataset, "_load_frames", lambda frame_path, frame_ids: (_ for _ in ()).throw(ValueError("boom")))
+
+    sample = dataset[0]
+
+    assert sample is None
+
+
+def test_val_resample_policy_recovers_from_data_error(monkeypatch):
+    samples = [
+        make_sample(frame_path="bad.frame", alter="bad sample"),
+        make_sample(frame_path="good.frame", alter="good sample"),
+    ]
+    dataset = make_dataset(
+        monkeypatch,
+        split="val",
+        samples=samples,
+        non_train_error_policy="resample",
+    )
+    calls = {"count": 0}
+
+    def flaky_load(frame_path, frame_ids):
+        calls["count"] += 1
+        if frame_path == "bad.frame":
+            raise ValueError("boom")
+        return [Image.new("RGB", (2, 2))]
+
+    monkeypatch.setattr(dataset, "_load_frames", flaky_load)
+    monkeypatch.setattr(wad_dataset.random, "randint", lambda a, b: 1)
+
+    sample = dataset[0]
+
+    assert calls["count"] >= 2
+    assert sample is not None
+    assert sample["frame_path"] == "good.frame"
 
 
 def test_build_dataset_returns_separate_train_and_val_datasets(monkeypatch):
