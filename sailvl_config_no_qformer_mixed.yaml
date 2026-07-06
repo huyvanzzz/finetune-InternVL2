@@ -1,0 +1,73 @@
+experiment:
+  name: "wad_sailvl_training_mixed"
+  version: "1.0"
+  description: "SAIL-VL-1.5-2B mixed QA+alter legacy setup without Q-Former"
+  tags: ["sailvl", "navigation", "mixed"]
+
+model:
+  architecture: "sailvl"
+  name: "BytedanceDouyinContent/SAIL-VL-1d5-2B"
+  base_model_name_or_path: "Qwen/Qwen2.5-1.5B-Instruct"
+  trust_remote_code: true
+  multimodal_max_length: 8192
+
+  qformer:
+    enabled: false
+
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    bias: "none"
+    task_type: "CAUSAL_LM"
+
+  quantization:
+    enabled: true
+    bits: 4
+    type: "nf4"
+    double_quant: true
+    compute_dtype: "bfloat16"
+
+  vision:
+    freeze_encoder: true
+    force_image_size: 448
+    use_thumbnail: true
+    min_dynamic_patch: 1
+    max_dynamic_patch: 12
+
+data:
+  name: "minhdang0901/WAD_Images_All_Size"
+  num_frames: 1
+  train_split: 0.9
+  seed: 42
+  response_format: "direct_text"
+
+training:
+  output_dir: "./outputs/sailvl_1d5_2b_no_qformer_mixed"
+  num_epochs: 5
+  batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2e-4
+  warmup_steps: 200
+  weight_decay: 0.01
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  eval_steps: 2000
+  save_steps: 2000
+  log_token_stats: true
+  token_log_batches: 5
+
+evaluation:
+  batch_size: 4
+  print_samples: 3

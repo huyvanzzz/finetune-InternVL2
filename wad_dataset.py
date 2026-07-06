@@ -4,6 +4,7 @@ from PIL import Image, UnidentifiedImageError
 import io
 from typing import List, Dict
 import random
+from collections import Counter
 from sklearn.model_selection import train_test_split
 import torch
 from preprocessing import format_ground_truth, get_response_format
@@ -167,6 +168,18 @@ Follow Chain-of-Thought reasoning:
             new_idx = random.randint(0, len(self) - 1)
             return self.__getitem__(new_idx)
 
+
+def summarize_task_counts_from_indices(metadata, indices):
+    counts = Counter()
+    for idx in indices:
+        sample = metadata[idx]
+        qa = sample.get("QA") if isinstance(sample, dict) else None
+        if isinstance(qa, dict) and qa.get("Q"):
+            counts["QA"] += 1
+        else:
+            counts["alter"] += 1
+    return counts
+
 def build_dataset(config: Dict):
     """Build train/eval datasets from config"""
     
@@ -252,12 +265,19 @@ def build_dataset(config: Dict):
         train_size=train_size,
         random_state=config['data']['seed']
     )
+    train_counts = summarize_task_counts_from_indices(train_dataset.metadata, train_indices)
+    val_counts = summarize_task_counts_from_indices(train_dataset.metadata, val_indices)
     
     from torch.utils.data import Subset
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(train_dataset, val_indices)
     
     print(f"✓ Train: {len(train_subset)}, Val: {len(val_subset)}")
+    print(
+        "  Final split stats | "
+        f"train(QA={train_counts['QA']}, alter={train_counts['alter']}) | "
+        f"val(QA={val_counts['QA']}, alter={val_counts['alter']})"
+    )
     
     # Limit eval dataset size
     eval_limit = config['data'].get('eval_limit', 200)

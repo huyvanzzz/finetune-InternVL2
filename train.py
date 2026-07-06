@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, get_cosine_schedule_with_warmup
 
+from backend_dispatch import get_backend_for_config
 from logutil import get_logger, init_logger
 
 
@@ -66,6 +67,22 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+def enable_gradient_checkpointing(model, logger):
+    try:
+        model.gradient_checkpointing_enable()
+        logger.info("Enabled gradient checkpointing on model.")
+        return "model"
+    except Exception:
+        language_model = getattr(model, "language_model", None)
+        gc_enable = getattr(language_model, "gradient_checkpointing_enable", None)
+        if callable(gc_enable):
+            gc_enable()
+            logger.info("Enabled gradient checkpointing on language_model.")
+            return "language_model"
+        logger.warning("Gradient checkpointing requested but unsupported by this runtime.")
+        return None
 
 
 def parse_args():
@@ -304,25 +321,28 @@ class CollaterFn:
         return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
 
 
-def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
+def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False, backend=None, config=None):
     model.eval()
     with torch.no_grad():
         total_test_batches = 0
         for batch in tqdm(val_loader_with_shuffle):
             _, _, _, _, _, samples = batch
             for sample in samples:
-                pixel_values = torch.cat(sample["pixel_values"], dim=0).to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
                 question = f"{sample['question']}"
-                if getattr(model, "qformer_enabled", False):
-                    q_ids, q_mask = model.encode_qformer_texts(
-                        [sample.get("qformer_text", question.replace("<image>", "").strip())] * pixel_values.shape[0],
-                        device=pixel_values.device,
-                    )
-                    model.set_qformer_text(q_ids, q_mask)
-                response = model.chat(tokenizer, pixel_values, question, generation_config)
-                if getattr(model, "qformer_enabled", False):
-                    model.clear_qformer_text()
+                if backend is not None:
+                    response = backend.generate_response(model, tokenizer, sample, generation_config, config)
+                else:
+                    pixel_values = torch.cat(sample["pixel_values"], dim=0).to(torch.bfloat16).cuda()
+                    if getattr(model, "qformer_enabled", False):
+                        q_ids, q_mask = model.encode_qformer_texts(
+                            [sample.get("qformer_text", question.replace("<image>", "").strip())] * pixel_values.shape[0],
+                            device=pixel_values.device,
+                        )
+                        model.set_qformer_text(q_ids, q_mask)
+                    response = model.chat(tokenizer, pixel_values, question, generation_config)
+                    if getattr(model, "qformer_enabled", False):
+                        model.clear_qformer_text()
                 question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
                 response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
                 ground_truth_token_count = len(tokenizer.encode(sample["answer"], add_special_tokens=False))
@@ -336,31 +356,34 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
-def eval_model(model, val_loader, step, epoch, epochs):
+def eval_model(model, val_loader, step, epoch, epochs, backend=None, config=None):
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
         total_eval_batchs = 0
         eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
         for batch in tqdm(val_loader, desc=eval_desc, leave=False):
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
-            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+            if backend is not None:
+                outputs = backend.forward_eval_batch(model, batch, config)
+            else:
+                input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+                input_ids_batch = input_ids_batch.cuda()
+                label_ids_batch = label_ids_batch.cuda()
+                attention_mask_batch = attention_mask_batch.cuda()
+                pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
+                image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+                if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                    model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
@@ -375,7 +398,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
     return avg_eval_loss
 
 
-def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
+def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0, backend=None):
     epochs = config["training"]["num_epochs"]
     lr = float(config["training"]["learning_rate"])
     accum_steps = config["training"]["gradient_accumulation_steps"]
@@ -431,7 +454,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     if resume_dir and os.path.exists(resume_dir):
         logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
-        if getattr(model, "qformer_enabled", False):
+        if backend is not None:
+            backend.load_backend_artifacts(model, resume_dir, config)
+            if getattr(model, "qformer_enabled", False):
+                backend.prepare_model_for_training(model, logger=logger)
+                logger.info("Loaded backend-specific Q-Former bridge states successfully!")
+        elif getattr(model, "qformer_enabled", False):
             load_qformer_bridge(model, resume_dir, strict=True)
             align_qformer_bridge_runtime(model)
             logger.info("Loaded Q-Former bridge states successfully!")
@@ -485,25 +513,28 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
         for batch in progress_bar:
             i += 1
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+            if backend is not None:
+                outputs = backend.forward_train_batch(model, batch, config)
+            else:
+                input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
 
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
-            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+                input_ids_batch = input_ids_batch.cuda()
+                label_ids_batch = label_ids_batch.cuda()
+                attention_mask_batch = attention_mask_batch.cuda()
+                pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
+                image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+                if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
+                    model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
 
             loss = outputs.loss / accum_steps
             progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
@@ -528,7 +559,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
-                val_loss = eval_model(model, val_loader, i, epoch, epochs)
+                val_loss = eval_model(model, val_loader, i, epoch, epochs, backend=backend, config=config)
                 if val_loss is not None:
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
@@ -538,9 +569,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 os.makedirs(step_save_dir, exist_ok=True)
                 logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
 
-                model.language_model.save_pretrained(step_save_dir)
-                save_qformer_bridge(model, step_save_dir)
-                tokenizer.save_pretrained(step_save_dir)
+                if backend is not None:
+                    backend.save_backend_artifacts(model, tokenizer, step_save_dir)
+                else:
+                    model.language_model.save_pretrained(step_save_dir)
+                    save_qformer_bridge(model, step_save_dir)
+                    tokenizer.save_pretrained(step_save_dir)
                 optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
                 if converted:
                     logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
@@ -552,9 +586,12 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
         os.makedirs(epoch_save_dir, exist_ok=True)
         logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
-        model.language_model.save_pretrained(epoch_save_dir)
-        save_qformer_bridge(model, epoch_save_dir)
-        tokenizer.save_pretrained(epoch_save_dir)
+        if backend is not None:
+            backend.save_backend_artifacts(model, tokenizer, epoch_save_dir)
+        else:
+            model.language_model.save_pretrained(epoch_save_dir)
+            save_qformer_bridge(model, epoch_save_dir)
+            tokenizer.save_pretrained(epoch_save_dir)
         optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
         if converted:
             logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
@@ -575,52 +612,81 @@ if __name__ == "__main__":
     resume_dir, start_epoch, start_step = resolve_resume_config(args, config)
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
+    backend = get_backend_for_config(config)
 
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=config["model"]["quantization"]["enabled"],
-        bnb_4bit_compute_dtype=torch.bfloat16 if config["model"]["quantization"]["compute_dtype"] == "bfloat16" else torch.float16,
-        bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
-        bnb_4bit_quant_type=config["model"]["quantization"]["type"],
-    )
-
-    logger.info(f"Loading model {model_name_or_path} in 4-bit...")
-    model = AutoModel.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        low_cpu_mem_usage=True,
-        trust_remote_code=config["model"]["trust_remote_code"],
-    )
-
-    model.config.use_cache = False
-    if config["training"]["gradient_checkpointing"]:
-        model.gradient_checkpointing_enable()
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
-    model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
-    model.system_message = SYSTEM_MESSAGE
-
-    if config["model"]["vision"]["freeze_encoder"]:
-        model.vision_model.requires_grad_(False)
-    if qformer_enabled(config):
-        attach_qformer_bridge(model, config, logger=logger)
-        align_qformer_bridge_runtime(model)
-
-    logger.info("Applying LoRA...")
-    model.language_model = prepare_model_for_kbit_training(model.language_model)
-
-    if hasattr(model.language_model, "get_input_embeddings"):
-        model.language_model.get_input_embeddings().to(torch.bfloat16)
-
-    if resume_dir:
-        logger.info(f"Loading LoRA adapter from checkpoint: {resume_dir}")
-        model.language_model = PeftModel.from_pretrained(
-            model.language_model,
-            resume_dir,
-            is_trainable=True,
-        )
+    if backend is not None:
+        logger.info("Loading model %s with backend '%s'...", model_name_or_path, backend.name)
+        model, tokenizer = backend.load_model_and_tokenizer(config, checkpoint_dir=resume_dir)
+        if hasattr(model, "config"):
+            model.config.use_cache = False
+        if config["training"]["gradient_checkpointing"]:
+            enable_gradient_checkpointing(model, logger)
+        model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        model.system_message = SYSTEM_MESSAGE
+        if config["model"]["vision"]["freeze_encoder"] and hasattr(model, "vision_model"):
+            model.vision_model.requires_grad_(False)
+        backend.attach_qformer_if_enabled(model, config, logger=logger)
+        logger.info("Applying LoRA...")
+        model.language_model = prepare_model_for_kbit_training(model.language_model)
+        if hasattr(model.language_model, "get_input_embeddings"):
+            model.language_model.get_input_embeddings().to(torch.bfloat16)
+        if resume_dir:
+            logger.info(f"Loading LoRA adapter from checkpoint: {resume_dir}")
+            model.language_model = PeftModel.from_pretrained(
+                model.language_model,
+                resume_dir,
+                is_trainable=True,
+            )
+        else:
+            model.language_model = build_fresh_lora_model(model.language_model, config, logger)
+        model.peft_base_model_name_or_path = config["model"].get("base_model_name_or_path", model_name_or_path)
+        backend.prepare_model_for_training(model, logger=logger)
     else:
-        model.language_model = build_fresh_lora_model(model.language_model, config, logger)
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=config["model"]["quantization"]["enabled"],
+            bnb_4bit_compute_dtype=torch.bfloat16 if config["model"]["quantization"]["compute_dtype"] == "bfloat16" else torch.float16,
+            bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
+            bnb_4bit_quant_type=config["model"]["quantization"]["type"],
+        )
+
+        logger.info(f"Loading model {model_name_or_path} in 4-bit...")
+        model = AutoModel.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+            low_cpu_mem_usage=True,
+            trust_remote_code=config["model"]["trust_remote_code"],
+        )
+
+        model.config.use_cache = False
+        if config["training"]["gradient_checkpointing"]:
+            enable_gradient_checkpointing(model, logger)
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
+        model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        model.system_message = SYSTEM_MESSAGE
+
+        if config["model"]["vision"]["freeze_encoder"]:
+            model.vision_model.requires_grad_(False)
+        if qformer_enabled(config):
+            attach_qformer_bridge(model, config, logger=logger)
+            align_qformer_bridge_runtime(model)
+
+        logger.info("Applying LoRA...")
+        model.language_model = prepare_model_for_kbit_training(model.language_model)
+
+        if hasattr(model.language_model, "get_input_embeddings"):
+            model.language_model.get_input_embeddings().to(torch.bfloat16)
+
+        if resume_dir:
+            logger.info(f"Loading LoRA adapter from checkpoint: {resume_dir}")
+            model.language_model = PeftModel.from_pretrained(
+                model.language_model,
+                resume_dir,
+                is_trainable=True,
+            )
+        else:
+            model.language_model = build_fresh_lora_model(model.language_model, config, logger)
 
     model.language_model.print_trainable_parameters()
     model.train()
@@ -628,28 +694,34 @@ if __name__ == "__main__":
     logger.info("Building dataset...")
     train_dataset, val_dataset = build_dataset(config)
 
-    collate_fn_wrapper = CollaterFn(tokenizer, model)
-    collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
-    collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    if backend is not None:
+        train_collate_fn = backend.build_train_collate_fn(tokenizer, model, config)
+        eval_collate_fn = backend.build_eval_collate_fn(tokenizer, model, config)
+    else:
+        train_collate_fn = CollaterFn(tokenizer, model)
+        eval_collate_fn = train_collate_fn
+
+    train_collate_fn.log_token_stats = bool(config["training"].get("log_token_stats", False))
+    train_collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
 
     logger.info(
         "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "num_image_token", "unknown"),
-        collate_fn_wrapper.log_token_stats,
-        collate_fn_wrapper.token_log_remaining,
+        train_collate_fn.log_token_stats,
+        train_collate_fn.token_log_remaining,
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
+        train_dataset, batch_size=batch_size, collate_fn=train_collate_fn, shuffle=True
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=False
+        val_dataset, batch_size=batch_size, collate_fn=eval_collate_fn, shuffle=False
     )
 
     val_loader_with_shuffle = DataLoader(
-        val_dataset, batch_size=1, collate_fn=collate_fn_wrapper, shuffle=True
+        val_dataset, batch_size=1, collate_fn=eval_collate_fn, shuffle=True
     )
 
     logger.info("STARTING TRAINING...")
@@ -664,4 +736,5 @@ if __name__ == "__main__":
         resume_dir=resume_dir,
         start_epoch=start_epoch,
         start_step=start_step,
+        backend=backend,
     )
