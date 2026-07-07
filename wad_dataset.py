@@ -243,6 +243,10 @@ def build_dataset(config: Dict):
     elif architecture == 'internvl':
         image_size = (448, 448)  # Fixed tile size
         print(f"✓ Using fixed tile size {image_size} for InternVL")
+    elif architecture == 'sailvl':
+        force_image_size = int(config['model']['vision'].get('force_image_size', 448))
+        image_size = (force_image_size, force_image_size)
+        print(f"✓ Using fixed reference tile size {image_size} for SAIL")
     else:
         image_size = tuple(config['model']['vision']['image_size'])
         print(f"✓ Using image size {image_size} for {architecture}")
