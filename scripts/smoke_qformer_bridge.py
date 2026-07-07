@@ -6,6 +6,7 @@ import yaml
 from transformers import AutoModel, BitsAndBytesConfig
 
 sys.path.append(".")
+from backend_dispatch import get_backend_for_config
 from qformer_bridge import attach_qformer_bridge, qformer_enabled, trainable_parameter_summary
 
 
@@ -20,6 +21,7 @@ def main():
     if not qformer_enabled(config):
         raise SystemExit("Q-Former is disabled; smoke test skipped.")
 
+    backend = get_backend_for_config(config)
     quant_cfg = None
     if not args.cpu and config["model"]["quantization"]["enabled"]:
         quant_cfg = BitsAndBytesConfig(
@@ -29,20 +31,26 @@ def main():
             bnb_4bit_quant_type=config["model"]["quantization"]["type"],
         )
 
-    model = AutoModel.from_pretrained(
-        config["model"]["name"],
-        torch_dtype=torch.bfloat16 if not args.cpu else torch.float32,
-        quantization_config=quant_cfg,
-        low_cpu_mem_usage=True,
-        trust_remote_code=config["model"]["trust_remote_code"],
-    )
-    attach_qformer_bridge(model, config)
-    model.vision_model.requires_grad_(False)
-    model.eval()
-
     device = torch.device("cpu" if args.cpu else "cuda")
-    if args.cpu:
-        model.to(device)
+    if backend is None:
+        model = AutoModel.from_pretrained(
+            config["model"]["name"],
+            torch_dtype=torch.bfloat16 if not args.cpu else torch.float32,
+            quantization_config=quant_cfg,
+            low_cpu_mem_usage=True,
+            trust_remote_code=config["model"]["trust_remote_code"],
+        )
+        attach_qformer_bridge(model, config)
+        model.vision_model.requires_grad_(False)
+        model.eval()
+        if args.cpu:
+            model.to(device)
+    else:
+        model, tokenizer = backend.load_model_and_tokenizer(config)
+        model = backend.attach_qformer_if_enabled(model, config)
+        model.eval()
+        if hasattr(backend, "prepare_model_for_training"):
+            backend.prepare_model_for_training(model)
 
     pixel_values = torch.zeros(
         1,
