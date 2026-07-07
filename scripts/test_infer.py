@@ -20,6 +20,7 @@ from wad_dataset import WADDatasetForInternVL
 from preprocessing import get_response_format
 from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
 from model.conversation import get_conv_template
+from scripts.pairs_output import write_prediction_pairs
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
@@ -144,6 +145,7 @@ def prepare_auxiliary_data(config):
             'danger_score': bbox_entry.get('danger_score', 0.0)
         })
     return frame_index, bbox_by_folder
+
 
 def main():
     args = parse_args()
@@ -320,6 +322,8 @@ def main():
     with open(args.output_file, "w", encoding="utf-8") as f:
         json.dump(final_output, f, ensure_ascii=False, indent=4)
     print(f"\n✓ Đã lưu chi tiết kết quả tại: {args.output_file}")
+    checkpoint_label = args.checkpoint if args.checkpoint else "Base Model"
+    write_prediction_pairs(args.output_file, checkpoint_label, args.split, detailed_results)
 
 if __name__ == "__main__":
     main()
