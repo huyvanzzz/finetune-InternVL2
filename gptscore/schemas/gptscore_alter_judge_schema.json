@@ -1,0 +1,76 @@
+{
+  "name": "gptscore_alter_judge",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "gate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "polarity_reversal": { "type": "boolean" },
+          "unsafe_action": { "type": "boolean" }
+        },
+        "required": [
+          "polarity_reversal",
+          "unsafe_action"
+        ]
+      },
+      "signals_in_gt": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "has_direction_anchor": { "type": "boolean" },
+          "has_action_demand": { "type": "boolean" },
+          "has_hazard_or_path_state": { "type": "boolean" }
+        },
+        "required": [
+          "has_direction_anchor",
+          "has_action_demand",
+          "has_hazard_or_path_state"
+        ]
+      },
+      "criteria": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "safety_correctness": { "$ref": "#/$defs/criterion" },
+          "hazard_path_state_fidelity": { "$ref": "#/$defs/criterion" },
+          "direction_fidelity": { "$ref": "#/$defs/criterion" },
+          "action_usefulness": { "$ref": "#/$defs/criterion" },
+          "spoken_guidance_quality": { "$ref": "#/$defs/criterion" }
+        },
+        "required": [
+          "safety_correctness",
+          "hazard_path_state_fidelity",
+          "direction_fidelity",
+          "action_usefulness",
+          "spoken_guidance_quality"
+        ]
+      },
+      "overall_rationale": { "type": "string" }
+    },
+    "required": [
+      "gate",
+      "signals_in_gt",
+      "criteria",
+      "overall_rationale"
+    ],
+    "$defs": {
+      "criterion": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "applicable": { "type": "boolean" },
+          "label": {
+            "type": ["string", "null"],
+            "enum": ["Fail", "Weak", "Acceptable", "Strong", null]
+          },
+          "rationale": { "type": "string" }
+        },
+        "required": ["applicable", "label", "rationale"]
+      }
+    }
+  }
+}

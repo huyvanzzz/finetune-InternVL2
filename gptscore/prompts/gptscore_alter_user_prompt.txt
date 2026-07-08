@@ -1,0 +1,5 @@
+Task: Evaluate the generated navigation guidance against the ground-truth guidance for a visually impaired user.
+
+Ground truth: {{GROUND_TRUTH}}
+Generation: {{GENERATION}}
+
