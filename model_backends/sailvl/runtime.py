@@ -4,13 +4,16 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from types import MethodType
 from typing import Dict, Optional
 
 import torch
+from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
@@ -34,6 +37,31 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+def _resolve_sail_config_path(model_name_or_path: str) -> str:
+    local_path = Path(model_name_or_path)
+    if local_path.exists():
+        config_path = local_path / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(f"config.json not found under local SAIL path: {model_name_or_path}")
+        return str(config_path)
+    return hf_hub_download(repo_id=model_name_or_path, filename="config.json")
+
+
+def _load_sail_config(model_name_or_path: str, trust_remote_code: bool):
+    config_path = _resolve_sail_config_path(model_name_or_path)
+    config_dict = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    class_ref = config_dict.get("auto_map", {}).get(
+        "AutoConfig",
+        "configuration_sailvl.SailVLConfig",
+    )
+    config_class = get_class_from_dynamic_module(
+        class_ref,
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+    return config_class(**config_dict)
 
 
 def _log_info(msg, *args):
@@ -298,8 +326,13 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
         bnb_4bit_use_double_quant=quant_cfg["double_quant"],
         bnb_4bit_quant_type=quant_cfg["type"],
     )
+    sail_config = _load_sail_config(
+        model_name_or_path,
+        trust_remote_code=config["model"]["trust_remote_code"],
+    )
     model = AutoModel.from_pretrained(
         model_name_or_path,
+        config=sail_config,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,

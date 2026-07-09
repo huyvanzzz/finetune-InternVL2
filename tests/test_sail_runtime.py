@@ -1,5 +1,6 @@
 import torch
 import json
+from pathlib import Path
 
 
 class DummyTemplate:
@@ -155,3 +156,93 @@ def test_save_backend_artifacts_writes_sail_bridge_metadata(tmp_path, monkeypatc
 
     metadata = json.loads((tmp_path / "qformer_bridge_config.json").read_text(encoding="utf-8"))
     assert metadata["bridge_backend"] == "sailvl"
+
+
+def test_load_model_and_tokenizer_builds_sail_config_without_autoconfig(tmp_path, monkeypatch):
+    from model_backends.sailvl.runtime import load_model_and_tokenizer
+
+    config_json = {
+        "architectures": ["SailVLModel"],
+        "model_type": "internvl_chat",
+        "llm_config": {
+            "architectures": ["Qwen2ForCausalLM"],
+            "model_type": "qwen2",
+        },
+        "vision_config": {},
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config_json), encoding="utf-8")
+
+    class DummySailConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    created = {}
+
+    def fake_get_class_from_dynamic_module(class_ref, pretrained_model_name_or_path, **kwargs):
+        created["class_ref"] = class_ref
+        created["repo"] = pretrained_model_name_or_path
+        return DummySailConfig
+
+    def fake_hf_hub_download(repo_id, filename):
+        created["download_repo"] = repo_id
+        created["download_filename"] = filename
+        return str(config_path)
+
+    class DummyAutoModel:
+        def __init__(self):
+            self.img_context_token_id = None
+            self.system_message = None
+
+    model_calls = {}
+
+    def fake_model_from_pretrained(model_name_or_path, **kwargs):
+        model_calls["model_name_or_path"] = model_name_or_path
+        model_calls["kwargs"] = kwargs
+        return DummyAutoModel()
+
+    class DummyTokenizerLoad:
+        def convert_tokens_to_ids(self, token):
+            return 123
+
+    tokenizer_calls = {}
+
+    def fake_tokenizer_from_pretrained(model_name_or_path, **kwargs):
+        tokenizer_calls["model_name_or_path"] = model_name_or_path
+        tokenizer_calls["kwargs"] = kwargs
+        return DummyTokenizerLoad()
+
+    class DummyBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("model_backends.sailvl.runtime.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr("model_backends.sailvl.runtime.get_class_from_dynamic_module", fake_get_class_from_dynamic_module)
+    monkeypatch.setattr("model_backends.sailvl.runtime.AutoModel.from_pretrained", fake_model_from_pretrained)
+    monkeypatch.setattr("model_backends.sailvl.runtime.AutoTokenizer.from_pretrained", fake_tokenizer_from_pretrained)
+    monkeypatch.setattr("model_backends.sailvl.runtime.BitsAndBytesConfig", DummyBitsAndBytesConfig)
+    monkeypatch.setattr("model_backends.sailvl.runtime.wrap_input_embeddings_for_safe_scatter", lambda model: None)
+    monkeypatch.setattr("model_backends.sailvl.runtime.patch_sail_forward_runtime", lambda model: None)
+
+    model, tokenizer = load_model_and_tokenizer(
+        {
+            "model": {
+                "name": "BytedanceDouyinContent/SAIL-VL-1d5-2B",
+                "trust_remote_code": True,
+                "quantization": {
+                    "enabled": True,
+                    "compute_dtype": "bfloat16",
+                    "double_quant": True,
+                    "type": "nf4",
+                },
+            }
+        }
+    )
+
+    assert created["download_repo"] == "BytedanceDouyinContent/SAIL-VL-1d5-2B"
+    assert created["class_ref"] == "configuration_sailvl.SailVLConfig"
+    assert isinstance(model_calls["kwargs"]["config"], DummySailConfig)
+    assert model_calls["kwargs"]["config"].kwargs["llm_config"]["architectures"] == ["Qwen2ForCausalLM"]
+    assert tokenizer_calls["model_name_or_path"] == "BytedanceDouyinContent/SAIL-VL-1d5-2B"
+    assert model.img_context_token_id == 123
+    assert tokenizer is not None
