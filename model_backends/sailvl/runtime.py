@@ -164,22 +164,6 @@ def patch_sail_forward_runtime(model):
         B, N, C = input_embeds.shape
         flat_input_embeds = input_embeds.reshape(B * N, C).clone()
 
-        dist = getattr(torch, "distributed", None)
-        rank_zero = True
-        if (
-            dist is not None
-            and callable(getattr(dist, "is_available", None))
-            and callable(getattr(dist, "is_initialized", None))
-            and dist.is_available()
-            and dist.is_initialized()
-            and callable(getattr(dist, "get_rank", None))
-        ):
-            rank_zero = dist.get_rank() == 0
-        if rank_zero:
-            print(
-                f"dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}"
-            )
-
         flat_input_ids = input_ids.reshape(B * N)
         selected = flat_input_ids == self.img_context_token_id
         flat_vit_embeds = vit_embeds.reshape(-1, C)
