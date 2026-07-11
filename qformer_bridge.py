@@ -10,6 +10,10 @@ from safetensors.torch import load_file, save_file
 from huggingface_hub.utils import EntryNotFoundError
 from transformers import InstructBlipConfig, InstructBlipProcessor, InstructBlipQFormerModel
 from huggingface_hub import hf_hub_download
+from trajectory_branch import (
+    attach_trajectory_branch,
+    build_trajectory_features,
+)
 
 
 BRIDGE_WEIGHTS_NAME = "qformer_bridge.safetensors"
@@ -176,6 +180,11 @@ def _ensure_bridge_device(model, reference: torch.Tensor):
         if module is not None:
             module.to(device=device, dtype=torch.float32)
 
+    for module_name in ("trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"):
+        module = getattr(model, module_name, None)
+        if module is not None:
+            module.to(device=device, dtype=torch.float32)
+
     model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=reference_dtype)
 
 
@@ -251,9 +260,24 @@ def _extract_feature_with_qformer(self, pixel_values):
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
     mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
+        traj_cls = build_trajectory_features(
+            self,
+            batch_size=mlp1_inputs.shape[0],
+            device=mlp1_inputs.device,
+        ).to(mlp1_inputs.dtype)
+        mlp1_inputs = mlp1_inputs + traj_cls
     mlp1_dtype = next(self.mlp1.parameters()).dtype
     mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
-    return self.mlp1(mlp1_inputs)
+    visual_tokens = self.mlp1(mlp1_inputs)
+    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "concat":
+        traj_tokens = build_trajectory_features(
+            self,
+            batch_size=visual_tokens.shape[0],
+            device=visual_tokens.device,
+        ).to(visual_tokens.dtype)
+        visual_tokens = torch.cat([visual_tokens, traj_tokens], dim=1)
+    return visual_tokens
 
 
 def _encode_qformer_texts(self, texts: List[str], device: Optional[torch.device] = None):
@@ -301,7 +325,7 @@ def save_qformer_bridge(model, output_dir: str):
     metadata = {
         "enabled": True,
         "source_model": model.qformer_source_model,
-        "num_query_tokens": model.num_image_token,
+        "num_query_tokens": getattr(model, "qformer_num_query_tokens", model.num_image_token),
         "prompt_aware": True,
         "bridge_mode": "prompt_aware_preproj_mlp1",
     }
@@ -365,6 +389,7 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
         nn.LayerNorm(qformer_hidden_size),
         nn.Linear(qformer_hidden_size, pixel_shuffle_dim),
     ).to(dtype=torch.float32)
+    model.qformer_num_query_tokens = num_query_tokens
     model.num_image_token = num_query_tokens
 
     if q_cfg["freeze_qformer"]:
@@ -387,6 +412,13 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
             f"num_query_tokens={num_query_tokens}, "
             f"llm_hidden_size={llm_hidden_size}"
         )
+    attach_trajectory_branch(
+        model,
+        config,
+        pixel_shuffle_dim=pixel_shuffle_dim,
+        llm_hidden_size=llm_hidden_size,
+        logger=logger,
+    )
     return model
 
 

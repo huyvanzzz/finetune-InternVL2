@@ -21,6 +21,7 @@ from preprocessing import get_response_format
 from qformer_bridge import attach_qformer_bridge, load_qformer_bridge, qformer_enabled
 from model.conversation import get_conv_template
 from scripts.pairs_output import write_prediction_pairs
+from trajectory_branch import build_trajectory_source_from_config, load_trajectory_branch
 
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
@@ -87,6 +88,7 @@ def resolve_checkpoint_path(checkpoint):
     if not checkpoint:
         return None
     if os.path.exists(checkpoint):
+        print(f"Using local checkpoint path: {checkpoint}")
         return checkpoint
     print(f"Checkpoint '{checkpoint}' không phải local path. Đang tải từ HuggingFace...")
     return snapshot_download(
@@ -144,7 +146,8 @@ def prepare_auxiliary_data(config):
             'speed': bbox_entry.get('speed', 0.0),
             'danger_score': bbox_entry.get('danger_score', 0.0)
         })
-    return frame_index, bbox_by_folder
+    trajectory_source = build_trajectory_source_from_config(config)
+    return frame_index, bbox_by_folder, trajectory_source
 
 
 def main():
@@ -191,6 +194,9 @@ def main():
         if qformer_enabled(config):
             load_qformer_bridge(model, args.checkpoint, strict=True)
             print("✓ Q-Former bridge loaded successfully.")
+        if getattr(model, "trajectory_enabled", False):
+            load_trajectory_branch(model, args.checkpoint, strict=True)
+            print("✓ Trajectory branch loaded successfully.")
         model.language_model = PeftModel.from_pretrained(
             model.language_model, 
             args.checkpoint, 
@@ -209,7 +215,7 @@ def main():
     # ==========================================
     print(f"Building dataset for split: {args.split}...")
     
-    frame_index, bbox_by_folder = prepare_auxiliary_data(config)
+    frame_index, bbox_by_folder, trajectory_source = prepare_auxiliary_data(config)
     
     if args.split == "test_alter":
         data_file = "test_alter.json" 
@@ -231,6 +237,7 @@ def main():
         metadata_dataset=dataset_dict,
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
+        trajectory_source=trajectory_source,
         split='test',
         response_format=response_format,
     )
@@ -273,9 +280,18 @@ def main():
                     device=pixel_values.device,
                 )
                 model.set_qformer_text(q_ids, q_mask)
+            if getattr(model, "trajectory_enabled", False):
+                model.set_trajectory_inputs(
+                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
+                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                )
             response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
             if getattr(model, "qformer_enabled", False):
                 model.clear_qformer_text()
+            if getattr(model, "trajectory_enabled", False):
+                model.clear_trajectory_inputs()
             question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
             response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
             ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
