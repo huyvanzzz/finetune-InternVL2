@@ -1,14 +1,21 @@
-import tarfile
-from torch.utils.data import Dataset
-from PIL import Image, UnidentifiedImageError
 import io
-from typing import List, Dict
+import os
+import pickle
 import random
-from sklearn.model_selection import train_test_split
+import tarfile
+from collections import defaultdict
+from typing import Dict, List
+
 import torch
-from preprocessing import format_ground_truth, get_response_format
-# BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
+from PIL import Image
+from datasets import load_dataset
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, Subset
+
 from data import process_image
+from preprocessing import format_ground_truth, get_response_format
+from trajectory_branch import build_trajectory_source_from_config
+
 
 class WADDatasetForInternVL(Dataset):
     def __init__(
@@ -16,103 +23,56 @@ class WADDatasetForInternVL(Dataset):
         metadata_dataset,
         frame_index: dict,
         bbox_by_folder: dict,
-        split: str = 'train',
-        response_format: str = 'structured_json',
+        trajectory_source=None,
+        split: str = "train",
+        response_format: str = "structured_json",
     ):
         self.metadata = metadata_dataset[split]
         self.frame_index = frame_index
         self.bbox_by_folder = bbox_by_folder
+        self.trajectory_source = trajectory_source
         self.split = split
         self.response_format = response_format
 
     def __len__(self):
         return len(self.metadata)
 
-    # ... (Giữ nguyên các hàm _load_frames, _load_bboxes, _select_frames_safe như cũ của bạn) ...
     def _load_frames(self, frame_path: str, frame_ids: List[int]) -> List[Image.Image]:
         shard_to_frames = {}
         for frame_id in frame_ids:
             if frame_id not in self.frame_index[frame_path]:
                 raise ValueError(f"Frame {frame_id} not in index")
             frame_info = self.frame_index[frame_path][frame_id]
-            shard_path = frame_info['shard']
-            if shard_path not in shard_to_frames:
-                shard_to_frames[shard_path] = []
-            shard_to_frames[shard_path].append((frame_id, frame_info['tar_path']))
-        
+            shard_path = frame_info["shard"]
+            shard_to_frames.setdefault(shard_path, []).append((frame_id, frame_info["tar_path"]))
+
         frames_dict = {}
         for shard_path, frame_list in shard_to_frames.items():
-            with tarfile.open(shard_path, 'r') as tar:
+            with tarfile.open(shard_path, "r") as tar:
                 for frame_id, tar_path in frame_list:
                     member = tar.getmember(tar_path)
                     file_obj = tar.extractfile(member)
-                    img = Image.open(io.BytesIO(file_obj.read())).convert('RGB')
+                    img = Image.open(io.BytesIO(file_obj.read())).convert("RGB")
                     frames_dict[frame_id] = img
         return [frames_dict[fid] for fid in frame_ids]
 
-    # def _load_bboxes(self, frame_path: str, frame_ids: List[int]) -> List[POLMData]:
-    #     polm_list = []
-    #     if frame_path not in self.bbox_by_folder:
-    #         return polm_list
-    #     for frame_id in frame_ids:
-    #         if frame_id in self.bbox_by_folder[frame_path]:
-    #             bboxes = self.bbox_by_folder[frame_path][frame_id]
-    #             for bbox in bboxes:
-    #                 polm = POLMData(
-    #                     object_type=bbox['label'],
-    #                     bbox=bbox['bbox'],
-    #                     relative_position = bbox.get('relative_position', "unknown"),
-    #                     distance_zone = bbox.get('distance_zone', 'unknown'),
-    #                     coming_to_user = bbox.get('coming_to_user', False),
-    #                     speed = bbox.get('speed', 0.0),
-    #                     danger_score= bbox.get('danger_score', 0.0),
-    #                     )
-    #                 polm_list.append(polm)
-    #             polm_list.sort(key=lambda x: x.distance_zone, reverse=True)
-    #     return polm_list[:15]
-
     def _select_frames_safe(self, frame_path: str) -> List[int]:
         available_frames = sorted(self.frame_index[frame_path].keys())
-        
-        # Ý bạn là lấy frame ở vị trí index 4, 6, 8 (tức là frame thứ 5, 7, 9)
-        # Nếu ý bạn là frame thứ 4, 6, 8 đếm từ 1 thì đổi thành [3, 5, 7] nhé.
         target_indices = [4, 6, 8]
-        
+
         selected_frames = []
         for idx in target_indices:
-            # Kiểm tra xem danh sách có đủ dài để lấy index này không
             if idx < len(available_frames):
                 selected_frames.append(available_frames[idx])
             else:
-                # Nếu không đủ frame (VD: video chỉ có 5 frames nhưng đòi lấy index 8)
-                # -> Lấy frame cuối cùng có sẵn để bù vào cho đủ 3 tensor
                 selected_frames.append(available_frames[-1])
-                
         return selected_frames
 
-    # ĐÂY LÀ PHẦN THAY ĐỔI QUAN TRỌNG NHẤT
-    def __getitem__(self, idx):
-        try:
-            sample = self.metadata[idx]
-            frame_path = sample['frame_path']
-            
-            # 1. Load Ảnh
-            frame_ids = self._select_frames_safe(frame_path)
-            last_frame_id = frame_ids[-1]
-            frames = self._load_frames(frame_path, [last_frame_id])
-            
-            # 2. Xử lý ảnh bằng hàm của tác giả zhangfaen (Tự cắt tile, tự tạo tensor)
-            pixel_values = [process_image(img) for img in frames]
-            
-            # 3. Tạo Text Prompt
-            # polm_list = self._load_bboxes(frame_path, frame_ids)
-            # polm_text = "\n".join([f"- {polm.to_text()}" for polm in polm_list])
-            
-            # Bắt buộc nối thêm <image>\n vào đầu để CollaterFn của tác giả nhận diện
-            if self.response_format == 'direct_text':
-                text_content = "Describe the scene for a visually impaired user based on the final frame."
-            else:
-                text_content = """
+    def _build_text_content(self, sample: Dict) -> str:
+        if self.response_format == "direct_text":
+            text_content = "Describe the scene for a visually impaired user based on the final frame."
+        else:
+            text_content = """
 
 Analyze: location, weather, traffic, scene → then give instruction.
 
@@ -121,147 +81,217 @@ Follow Chain-of-Thought reasoning:
 2. Comprehension: Synthesize details into the "scene".
 3. Decision: Formulate the final "instruction"."""
 
-            # Kiểm tra xem có câu hỏi phụ không
-            has_question = sample.get('QA') and sample['QA'].get('Q')
-            
-            if has_question:
-                if self.response_format == 'direct_text':
-                    text_content += (
-                        "\nFocus on obstacles, nearby people or vehicles, free walking space, direction, and safety."
-                        f"\nQuestion: {sample['QA']['Q']}"
-                    )
-                else:
-                    text_content += f"\n\nQuestion: {sample['QA']['Q']}"
-                if self.response_format == 'direct_text':
-                    text_content += "\nAnswer the question directly in natural language."
-                else:
-                    text_content += """\n\nFormat response:
-<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
+        has_question = sample.get("QA") and sample["QA"].get("Q")
+        if has_question:
+            if self.response_format == "direct_text":
+                text_content += (
+                    "\nFocus on obstacles, nearby people or vehicles, free walking space, direction, and safety."
+                    f"\nQuestion: {sample['QA']['Q']}"
+                )
             else:
-                if self.response_format == 'direct_text':
-                    text_content += (
-                        "\nFocus on immediate obstacles, safe direction, and what action the user should take."
-                        "\nProvide only the final spoken guidance in natural language."
-                    )
-                else:
-                    text_content += """\n\nFormat response:
+                text_content += f"\n\nQuestion: {sample['QA']['Q']}"
+            if self.response_format == "direct_text":
+                text_content += "\nAnswer the question directly in natural language."
+            else:
+                text_content += """\n\nFormat response:
+<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<your answer to the question>"}</answer>"""
+        else:
+            if self.response_format == "direct_text":
+                text_content += (
+                    "\nFocus on immediate obstacles, safe direction, and what action the user should take."
+                    "\nProvide only the final spoken guidance in natural language."
+                )
+            else:
+                text_content += """\n\nFormat response:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
+        return text_content
 
-            # Chốt lại: Gắn thẻ <image>\n lên đầu để mô hình biết vị trí nhét ảnh
-            question = f"<image>\n{text_content}"
-            
-            # 4. Tạo Answer (Ground Truth)
+    def _build_question(self, text_content: str) -> str:
+        return f"<image>\n{text_content}"
+
+    def get_debug_snapshot(self, idx: int) -> Dict:
+        sample = self.metadata[idx]
+        frame_path = sample["frame_path"]
+        frame_ids = self._select_frames_safe(frame_path)
+        last_frame_id = frame_ids[-1]
+        text_content = self._build_text_content(sample)
+        answer = format_ground_truth(sample, self.response_format)
+
+        snapshot = {
+            "frame_path": frame_path,
+            "last_frame_id": last_frame_id,
+            "question": self._build_question(text_content),
+            "qformer_text": text_content.strip(),
+            "answer": answer,
+            "has_trajectory": False,
+        }
+        if self.trajectory_source is not None:
+            trajectory = self.trajectory_source.encode(frame_path, last_frame_id)
+            snapshot["has_trajectory"] = bool(trajectory["trajectory_object_mask"].sum().item() > 0)
+            snapshot["trajectory_label_ids"] = trajectory["trajectory_label_ids"].tolist()
+            snapshot["trajectory_direction_ids"] = trajectory["trajectory_direction_ids"].tolist()
+            snapshot["trajectory_object_mask"] = trajectory["trajectory_object_mask"].tolist()
+            snapshot["trajectory_numeric_feats"] = trajectory["trajectory_numeric_feats"].tolist()
+        return snapshot
+
+    def __getitem__(self, idx):
+        try:
+            sample = self.metadata[idx]
+            frame_path = sample["frame_path"]
+
+            frame_ids = self._select_frames_safe(frame_path)
+            last_frame_id = frame_ids[-1]
+            frames = self._load_frames(frame_path, [last_frame_id])
+            pixel_values = [process_image(img) for img in frames]
+
+            text_content = self._build_text_content(sample)
+            question = self._build_question(text_content)
             answer = format_ground_truth(sample, self.response_format)
+            trajectory_fields = (
+                self.trajectory_source.encode(frame_path, last_frame_id)
+                if self.trajectory_source is not None
+                else {}
+            )
 
-            # 5. Trả về đúng Dict cho train.py
             return {
-                'question': question, 
-                'answer': answer, 
-                'qformer_text': text_content.strip(),
-                'pixel_values': pixel_values, 
-                'questionId': str(idx),
-                'image': frames
+                "question": question,
+                "answer": answer,
+                "qformer_text": text_content.strip(),
+                "pixel_values": pixel_values,
+                "questionId": str(idx),
+                "image": frames,
+                **trajectory_fields,
             }
-
-        except Exception as e:
+        except Exception:
             new_idx = random.randint(0, len(self) - 1)
             return self.__getitem__(new_idx)
 
+
+def _trajectory_match_stats(dataset: WADDatasetForInternVL, subset: Subset):
+    exact_matches = 0
+    empty_objects = 0
+    for idx in subset.indices:
+        sample = dataset.metadata[idx]
+        frame_path = sample["frame_path"]
+        frame_ids = dataset._select_frames_safe(frame_path)
+        last_frame_id = frame_ids[-1]
+        if dataset.trajectory_source.has_record(frame_path, last_frame_id):
+            exact_matches += 1
+        else:
+            empty_objects += 1
+    return exact_matches, empty_objects
+
+
+def _print_debug_samples(name: str, dataset: WADDatasetForInternVL, subset: Subset, limit: int = 2):
+    if len(subset.indices) == 0:
+        return
+    print(f"[DEBUG] {name} prompt/trajectory samples:")
+    for local_i, idx in enumerate(subset.indices[:limit], start=1):
+        snapshot = dataset.get_debug_snapshot(idx)
+        print(f"[DEBUG] {name} sample {local_i} | frame_path={snapshot['frame_path']} | last_frame_id={snapshot['last_frame_id']}")
+        print(f"[DEBUG] question: {snapshot['question']}")
+        print(f"[DEBUG] qformer_text: {snapshot['qformer_text']}")
+        print(f"[DEBUG] answer: {snapshot['answer']}")
+        if "trajectory_label_ids" in snapshot:
+            print(
+                f"[DEBUG] trajectory | has_trajectory={snapshot['has_trajectory']} | "
+                f"label_ids={snapshot['trajectory_label_ids']} | "
+                f"direction_ids={snapshot['trajectory_direction_ids']} | "
+                f"object_mask={snapshot['trajectory_object_mask']} | "
+                f"numeric_feats={snapshot['trajectory_numeric_feats']}"
+            )
+
+
 def build_dataset(config: Dict):
-    """Build train/eval datasets from config"""
-    
-    from datasets import load_dataset
-    from collections import defaultdict
-    import pickle
-    import os
-    
     response_format = get_response_format(config)
-    
-    # Load metadata
+    trajectory_source = build_trajectory_source_from_config(config)
+
     print("Loading metadata...")
     metadata = load_dataset(
-        config['data']['name'],
+        config["data"]["name"],
         data_files={
             "train": "train.json",
-            "test": "test_alter.json"
-        }
+            "test": "test_alter.json",
+        },
     )
-    
-    # Load bboxes
+
     print("Loading bboxes...")
     bbox_dataset = load_dataset(
-        config['data']['name'],
+        config["data"]["name"],
         data_files="all_bboxes_1.jsonl",
-        split="train"
+        split="train",
     )
-    
+
     bbox_by_folder = defaultdict(lambda: defaultdict(list))
     for bbox_entry in bbox_dataset:
-        folder_id = bbox_entry['folder_id']
-        frame_id = bbox_entry['frame_id']
-        
-        bbox_by_folder[folder_id][frame_id].append({
-            'label': bbox_entry['label'],
-            'confidence': bbox_entry['probs'],
-            'bbox': bbox_entry['boxs'],
-            'relative_position': bbox_entry.get('relative_position', "unknown"),
-            'distance_zone': bbox_entry.get('distance_zone', 'unknown'),
-            'coming_to_user': bbox_entry.get('coming_to_user', False),
-            'speed': bbox_entry.get('speed', 0.0),
-            'danger_score': bbox_entry.get('danger_score', 0.0)
-        })
-    
-    # Load frame index
+        folder_id = bbox_entry["folder_id"]
+        frame_id = bbox_entry["frame_id"]
+        bbox_by_folder[folder_id][frame_id].append(
+            {
+                "label": bbox_entry["label"],
+                "confidence": bbox_entry["probs"],
+                "bbox": bbox_entry["boxs"],
+                "relative_position": bbox_entry.get("relative_position", "unknown"),
+                "distance_zone": bbox_entry.get("distance_zone", "unknown"),
+                "coming_to_user": bbox_entry.get("coming_to_user", False),
+                "speed": bbox_entry.get("speed", 0.0),
+                "danger_score": bbox_entry.get("danger_score", 0.0),
+            }
+        )
+
     print("Loading frame index...")
     index_file = "./wad_dataset/frame_index.pkl"
-    
     if os.path.exists(index_file):
-        with open(index_file, 'rb') as f:
+        with open(index_file, "rb") as f:
             frame_index = pickle.load(f)
     else:
         raise FileNotFoundError(f"Frame index not found at {index_file}. Run build_frame_index.py first.")
-    
-    architecture = config['model']['architecture']
-    
-    # Determine image size based on architecture
-    if architecture == 'qwen':
-        image_size = None  # Dynamic resolution
-        print(f"✓ Using dynamic resolution for Qwen")
-    elif architecture == 'internvl':
-        image_size = (448, 448)  # Fixed tile size
+
+    architecture = config["model"]["architecture"]
+    if architecture == "qwen":
+        image_size = None
+        print("✓ Using dynamic resolution for Qwen")
+    elif architecture == "internvl":
+        image_size = (448, 448)
         print(f"✓ Using fixed tile size {image_size} for InternVL")
     else:
-        image_size = tuple(config['model']['vision']['image_size'])
+        image_size = tuple(config["model"]["vision"]["image_size"])
         print(f"✓ Using image size {image_size} for {architecture}")
-    
-    # Create datasets
+
     train_dataset = WADDatasetForInternVL(
         metadata_dataset=metadata,
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
-        split='train',
+        trajectory_source=trajectory_source,
+        split="train",
         response_format=response_format,
     )
-    
-    # Train/val split
-    train_size = config['data']['train_split']
+
+    train_size = config["data"]["train_split"]
     indices = list(range(len(train_dataset)))
-    
     train_indices, val_indices = train_test_split(
         indices,
         train_size=train_size,
-        random_state=config['data']['seed']
+        random_state=config["data"]["seed"],
     )
-    
-    from torch.utils.data import Subset
+
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(train_dataset, val_indices)
-    
+
     print(f"✓ Train: {len(train_subset)}, Val: {len(val_subset)}")
-    
-    # Limit eval dataset size
-    eval_limit = config['data'].get('eval_limit', 200)
-    
+    if trajectory_source is not None:
+        train_exact, train_empty = _trajectory_match_stats(train_dataset, train_subset)
+        val_exact, val_empty = _trajectory_match_stats(train_dataset, val_subset)
+        print(
+            "[DEBUG] Trajectory join stats | "
+            f"source={trajectory_source.source_file} | "
+            f"train(exact={train_exact}, empty={train_empty}) | "
+            f"val(exact={val_exact}, empty={val_empty})"
+        )
+        _print_debug_samples("train", train_dataset, train_subset, limit=2)
+        _print_debug_samples("val", train_dataset, val_subset, limit=2)
+
+    eval_limit = config["data"].get("eval_limit", 200)
     if len(val_subset) > eval_limit:
         print(f"  Limiting eval dataset: {len(val_subset)} → {eval_limit} samples")
         val_subset = Subset(val_subset, list(range(eval_limit)))

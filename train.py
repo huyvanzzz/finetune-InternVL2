@@ -67,6 +67,11 @@ from qformer_bridge import (
     save_qformer_bridge,
     trainable_parameter_summary,
 )
+from trajectory_branch import (
+    load_trajectory_branch,
+    save_trajectory_branch,
+    trajectory_enabled,
+)
 
 
 IMG_START_TOKEN = "<img>"
@@ -109,6 +114,7 @@ def resolve_checkpoint_path(checkpoint):
     if not checkpoint:
         return None
     if os.path.exists(checkpoint):
+        logger.info(f"Using local checkpoint path: {checkpoint}")
         return checkpoint
     logger.info(f"Checkpoint is not a local path. Downloading from Hugging Face: {checkpoint}")
     return snapshot_download(
@@ -175,6 +181,10 @@ class CollaterFn:
         attention_mask_batch = []
         pixel_values_batch = []
         qformer_texts = []
+        trajectory_label_ids_batch = []
+        trajectory_direction_ids_batch = []
+        trajectory_numeric_feats_batch = []
+        trajectory_object_mask_batch = []
         samples_batch = []
 
         for sample in batch:
@@ -231,15 +241,43 @@ class CollaterFn:
             if getattr(self.model, "qformer_enabled", False):
                 qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
                 qformer_texts.extend([qformer_text] * total_tiles)
+            if getattr(self.model, "trajectory_enabled", False):
+                label_ids = sample.get("trajectory_label_ids")
+                direction_ids = sample.get("trajectory_direction_ids")
+                numeric_feats = sample.get("trajectory_numeric_feats")
+                object_mask = sample.get("trajectory_object_mask")
+                if label_ids is None or direction_ids is None or numeric_feats is None or object_mask is None:
+                    raise ValueError("Trajectory-enabled sample is missing trajectory fields.")
+                for _ in range(total_tiles):
+                    trajectory_label_ids_batch.append(torch.as_tensor(label_ids, dtype=torch.long))
+                    trajectory_direction_ids_batch.append(torch.as_tensor(direction_ids, dtype=torch.long))
+                    trajectory_numeric_feats_batch.append(torch.as_tensor(numeric_feats, dtype=torch.float32))
+                    trajectory_object_mask_batch.append(torch.as_tensor(object_mask, dtype=torch.long))
 
         input_ids_tensor = maybe_pad(input_ids_batch, eot_token_id)
         label_ids_tensor = maybe_pad(label_ids_batch, -100)
         attention_mask_tensor = maybe_pad(attention_mask_batch, 0)
         pixel_values_tensor = torch.cat(pixel_values_batch)
         qformer_inputs = None
+        trajectory_inputs = None
         if getattr(self.model, "qformer_enabled", False):
             qformer_inputs = self.model.encode_qformer_texts(qformer_texts)
-        return input_ids_tensor, label_ids_tensor, attention_mask_tensor, pixel_values_tensor, qformer_inputs, samples_batch
+        if getattr(self.model, "trajectory_enabled", False):
+            trajectory_inputs = (
+                torch.stack(trajectory_label_ids_batch, dim=0),
+                torch.stack(trajectory_direction_ids_batch, dim=0),
+                torch.stack(trajectory_numeric_feats_batch, dim=0),
+                torch.stack(trajectory_object_mask_batch, dim=0),
+            )
+        return (
+            input_ids_tensor,
+            label_ids_tensor,
+            attention_mask_tensor,
+            pixel_values_tensor,
+            qformer_inputs,
+            trajectory_inputs,
+            samples_batch,
+        )
 
 
 def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
@@ -247,7 +285,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
     with torch.no_grad():
         total_test_batches = 0
         for batch in tqdm(val_loader_with_shuffle):
-            _, _, _, _, _, samples = batch
+            _, _, _, _, _, _, samples = batch
             for sample in samples:
                 pixel_values = torch.cat(sample["pixel_values"], dim=0).to(torch.bfloat16).cuda()
                 generation_config = dict(max_new_tokens=512, do_sample=False)
@@ -258,9 +296,18 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                         device=pixel_values.device,
                     )
                     model.set_qformer_text(q_ids, q_mask)
+                if getattr(model, "trajectory_enabled", False):
+                    model.set_trajectory_inputs(
+                        sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                        sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                        sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
+                        sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    )
                 response = model.chat(tokenizer, pixel_values, question, generation_config)
                 if getattr(model, "qformer_enabled", False):
                     model.clear_qformer_text()
+                if getattr(model, "trajectory_enabled", False):
+                    model.clear_trajectory_inputs()
                 question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
                 response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
                 ground_truth_token_count = len(tokenizer.encode(sample["answer"], add_special_tokens=False))
@@ -281,7 +328,7 @@ def eval_model(model, val_loader, step, epoch, epochs):
         total_eval_batchs = 0
         eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
         for batch in tqdm(val_loader, desc=eval_desc, leave=False):
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
             attention_mask_batch = attention_mask_batch.cuda()
@@ -289,6 +336,13 @@ def eval_model(model, val_loader, step, epoch, epochs):
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
             if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
                 model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+            if getattr(model, "trajectory_enabled", False) and trajectory_inputs is not None:
+                model.set_trajectory_inputs(
+                    trajectory_inputs[0].cuda(),
+                    trajectory_inputs[1].cuda(),
+                    trajectory_inputs[2].cuda(),
+                    trajectory_inputs[3].cuda(),
+                )
 
             outputs = model(
                 input_ids=input_ids_batch,
@@ -299,6 +353,8 @@ def eval_model(model, val_loader, step, epoch, epochs):
             )
             if getattr(model, "qformer_enabled", False):
                 model.clear_qformer_text()
+            if getattr(model, "trajectory_enabled", False):
+                model.clear_trajectory_inputs()
             loss = outputs.loss
             total_eval_loss += loss.item()
             total_eval_batchs += 1
@@ -336,7 +392,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
 
     proj_lr = float(config["training"].get("proj_learning_rate", lr))
-    proj_param_names = {"qformer_input_proj", "qformer_to_mlp1_proj"}
+    proj_param_names = {
+        "qformer_input_proj",
+        "qformer_to_mlp1_proj",
+        "trajectory_backbone",
+        "trajectory_cls_head",
+        "trajectory_token_projector",
+    }
 
     proj_params = [
         p for n, p in model.named_parameters()
@@ -373,6 +435,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             load_qformer_bridge(model, resume_dir, strict=True)
             align_qformer_bridge_runtime(model)
             logger.info("Loaded Q-Former bridge states successfully!")
+        if getattr(model, "trajectory_enabled", False):
+            load_trajectory_branch(model, resume_dir, strict=True)
+            align_qformer_bridge_runtime(model)
+            logger.info("Loaded trajectory branch states successfully!")
 
         opt_path = os.path.join(resume_dir, "optimizer.pt")
         sch_path = os.path.join(resume_dir, "scheduler.pt")
@@ -423,7 +489,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
         for batch in progress_bar:
             i += 1
-            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, _ = batch
+            input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
 
             input_ids_batch = input_ids_batch.cuda()
             label_ids_batch = label_ids_batch.cuda()
@@ -432,6 +498,13 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
             if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
                 model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+            if getattr(model, "trajectory_enabled", False) and trajectory_inputs is not None:
+                model.set_trajectory_inputs(
+                    trajectory_inputs[0].cuda(),
+                    trajectory_inputs[1].cuda(),
+                    trajectory_inputs[2].cuda(),
+                    trajectory_inputs[3].cuda(),
+                )
 
             outputs = model(
                 input_ids=input_ids_batch,
@@ -442,6 +515,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             )
             if getattr(model, "qformer_enabled", False):
                 model.clear_qformer_text()
+            if getattr(model, "trajectory_enabled", False):
+                model.clear_trajectory_inputs()
 
             loss = outputs.loss / accum_steps
             progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
@@ -478,6 +553,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
                 model.language_model.save_pretrained(step_save_dir)
                 save_qformer_bridge(model, step_save_dir)
+                save_trajectory_branch(model, step_save_dir)
                 tokenizer.save_pretrained(step_save_dir)
                 optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
                 if converted:
@@ -492,6 +568,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
         model.language_model.save_pretrained(epoch_save_dir)
         save_qformer_bridge(model, epoch_save_dir)
+        save_trajectory_branch(model, epoch_save_dir)
         tokenizer.save_pretrained(epoch_save_dir)
         optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
         if converted:
@@ -571,9 +648,13 @@ if __name__ == "__main__":
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
 
     logger.info(
-        "Runtime check | qformer_enabled=%s | num_image_token=%s | log_token_stats=%s | token_log_batches=%s",
+        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s",
         getattr(model, "qformer_enabled", False),
+        getattr(model, "trajectory_enabled", False),
+        getattr(model, "trajectory_fusion_mode", "disabled"),
+        getattr(model, "trajectory_source_file", "n/a"),
         getattr(model, "num_image_token", "unknown"),
+        getattr(model, "qformer_num_query_tokens", getattr(model, "num_image_token", "unknown")),
         collate_fn_wrapper.log_token_stats,
         collate_fn_wrapper.token_log_remaining,
     )
