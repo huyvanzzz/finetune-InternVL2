@@ -99,6 +99,8 @@ def resolve_checkpoint_path(checkpoint):
             "adapter_model.bin",
             "qformer_bridge.safetensors",
             "qformer_bridge_config.json",
+            "trajectory_branch.safetensors",
+            "trajectory_branch_config.json",
             "tokenizer*",
             "special_tokens_map.json",
             "added_tokens.json",
