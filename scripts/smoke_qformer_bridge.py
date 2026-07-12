@@ -61,7 +61,7 @@ def main():
         visual_embeds = model.extract_feature(pixel_values)
     model.clear_qformer_text()
 
-    expected_tokens = config["model"]["qformer"]["num_query_tokens"]
+    expected_tokens = model.num_image_token
     assert visual_embeds.shape[1] == expected_tokens, visual_embeds.shape
     assert visual_embeds.shape[-1] == model.config.llm_config.hidden_size, visual_embeds.shape
 
