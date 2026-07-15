@@ -4,6 +4,9 @@ import json
 import os
 import random
 import re
+import shutil
+from dataclasses import dataclass
+from math import floor
 from typing import Dict
 
 import numpy as np
@@ -42,6 +45,27 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+
+
+@dataclass
+class EarlyStoppingState:
+    patience: int
+    min_delta: float
+    best_val_loss: float | None = None
+    best_epoch: int | None = None
+    num_bad_epochs: int = 0
+
+    def update(self, epoch: int, val_loss: float):
+        improved = self.best_val_loss is None or val_loss < (self.best_val_loss - self.min_delta)
+        if improved:
+            self.best_val_loss = val_loss
+            self.best_epoch = epoch
+            self.num_bad_epochs = 0
+            return True, False
+
+        self.num_bad_epochs += 1
+        should_stop = self.num_bad_epochs >= self.patience
+        return False, should_stop
 
 
 def set_seed(seed=42):
@@ -106,10 +130,11 @@ class PretrainCollaterFn:
                     total_image_tokens_in_sample,
                 )
                 logger.info(
-                    "[INFO] Pretrain text tokens | input=%s | answer=%s | total=%s",
+                    "[INFO] Pretrain text tokens | input=%s | answer=%s | total=%s | total_input_tokens=%s",
                     len(input_ids),
                     len(answer_ids),
                     total_sequence_length,
+                    len(input_ids),
                 )
                 if self.token_log_remaining > 0:
                     self.token_log_remaining -= 1
@@ -397,52 +422,79 @@ def build_dataloaders(config: Dict, model, tokenizer):
     return train_dataset, val_dataset, train_loader, val_loader
 
 
+def resolve_warmup_steps(config: Dict, total_training_steps: int) -> int:
+    training_cfg = config["training"]
+    if "warmup_ratio" in training_cfg:
+        warmup_ratio = float(training_cfg.get("warmup_ratio", 0.0))
+        warmup_min_steps = int(training_cfg.get("warmup_min_steps", 0))
+        warmup_max_steps = int(training_cfg.get("warmup_max_steps", total_training_steps))
+        computed = floor(total_training_steps * warmup_ratio)
+        return max(warmup_min_steps, min(warmup_max_steps, computed))
+    return int(training_cfg.get("warmup_steps", 0))
+
+
 def _build_optimizer(model, config: Dict, logger):
     base_lr = float(config["training"]["learning_rate"])
-    proj_lr = float(config["training"].get("proj_learning_rate", base_lr))
+    trajectory_lr = float(config["training"].get("trajectory_learning_rate", config["training"].get("proj_learning_rate", base_lr)))
+    bridge_lr = float(config["training"].get("bridge_learning_rate", base_lr))
     weight_decay = float(config["training"]["weight_decay"])
 
-    proj_param_names = {
+    bridge_param_names = {
         "qformer_input_proj",
         "qformer_to_mlp1_proj",
+    }
+    trajectory_param_names = {
         "trajectory_backbone",
         "trajectory_cls_head",
         "trajectory_token_projector",
     }
 
-    proj_params = [
+    bridge_params = [
         p for n, p in model.named_parameters()
-        if p.requires_grad and any(pn in n for pn in proj_param_names)
+        if p.requires_grad and any(pn in n for pn in bridge_param_names)
+    ]
+    trajectory_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and any(pn in n for pn in trajectory_param_names)
     ]
     other_params = [
         p for n, p in model.named_parameters()
-        if p.requires_grad and not any(pn in n for pn in proj_param_names)
+        if p.requires_grad
+        and not any(pn in n for pn in bridge_param_names)
+        and not any(pn in n for pn in trajectory_param_names)
     ]
     logger.info(
-        "Pretrain param groups | proj=%s params @ lr=%s | other=%s params @ lr=%s",
-        sum(p.numel() for p in proj_params),
-        proj_lr,
+        "Pretrain param groups | trajectory=%s params @ lr=%s | bridge=%s params @ lr=%s | other=%s params @ lr=%s",
+        sum(p.numel() for p in trajectory_params),
+        trajectory_lr,
+        sum(p.numel() for p in bridge_params),
+        bridge_lr,
         sum(p.numel() for p in other_params),
         base_lr,
     )
 
-    optimizer = AdamW(
-        [
-            {"params": proj_params, "lr": proj_lr},
-            {"params": other_params, "lr": base_lr},
-        ],
-        weight_decay=weight_decay,
-        foreach=False,
-    )
+    param_groups = []
+    if trajectory_params:
+        param_groups.append({"params": trajectory_params, "lr": trajectory_lr})
+    if bridge_params:
+        param_groups.append({"params": bridge_params, "lr": bridge_lr})
+    if other_params:
+        param_groups.append({"params": other_params, "lr": base_lr})
+
+    optimizer = AdamW(param_groups, weight_decay=weight_decay, foreach=False)
     enforce_safe_optimizer_param_groups(optimizer)
     return optimizer
 
 
-def _save_pretrain_checkpoint(model, tokenizer, output_dir: str):
+def _save_pretrain_checkpoint(model, tokenizer, output_dir: str, optimizer=None, lr_scheduler=None):
     os.makedirs(output_dir, exist_ok=True)
     save_qformer_bridge(model, output_dir)
     save_trajectory_branch(model, output_dir)
     tokenizer.save_pretrained(output_dir)
+    if optimizer is not None:
+        torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+    if lr_scheduler is not None:
+        torch.save(lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 
 
 def _log_error_stats(logger, prefix: str, stats: Dict):
@@ -503,22 +555,17 @@ def eval_pretrain(model, val_loader, epoch: int, epochs: int, device: torch.devi
 def train_pretrain(model, tokenizer, train_loader, val_loader, config: Dict, output_dir: str, logger):
     epochs = int(config["training"]["num_epochs"])
     accum_steps = int(config["training"]["gradient_accumulation_steps"])
-    warmup_steps = int(config["training"]["warmup_steps"])
     max_grad_norm = float(config["training"]["max_grad_norm"])
-    metrics_path = os.path.join(output_dir, "metrics.json")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     optimizer = _build_optimizer(model, config, logger)
     total_training_steps = max((len(train_loader) * epochs) // max(accum_steps, 1), 1)
+    warmup_steps = resolve_warmup_steps(config, total_training_steps)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_training_steps,
     )
-
-    metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     logger.info("Trainable parameter summary:")
     for row in trainable_parameter_summary(model):
@@ -555,6 +602,14 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
     max_grad_norm = float(config["training"]["max_grad_norm"])
     metrics_path = os.path.join(output_dir, "metrics.json")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    patience = int(config["training"].get("early_stopping_patience", 0))
+    min_delta = float(config["training"].get("early_stopping_min_delta", 0.0))
+    restore_best_checkpoint = bool(config["training"].get("restore_best_checkpoint", True))
+    best_dir = os.path.join(output_dir, "best")
+    early_stopping = EarlyStoppingState(patience=patience, min_delta=min_delta) if patience > 0 else None
+    metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     optimizer, lr_scheduler = train_pretrain(model, tokenizer, train_loader, val_loader, config, output_dir, logger)
 
@@ -627,15 +682,40 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
             avg_epoch_loss,
             val_loss,
         )
+        improved = False
+        should_stop = False
+        if early_stopping is not None:
+            improved, should_stop = early_stopping.update(epoch=epoch + 1, val_loss=val_loss)
+            logger.info(
+                "Early stopping status | improved=%s | best_epoch=%s | best_val_loss=%.4f | bad_epochs=%s/%s",
+                improved,
+                early_stopping.best_epoch,
+                early_stopping.best_val_loss if early_stopping.best_val_loss is not None else float("nan"),
+                early_stopping.num_bad_epochs,
+                early_stopping.patience,
+            )
 
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
 
         epoch_save_dir = os.path.join(output_dir, f"epoch_{epoch + 1}")
-        _save_pretrain_checkpoint(model, tokenizer, epoch_save_dir)
-        torch.save(optimizer.state_dict(), os.path.join(epoch_save_dir, "optimizer.pt"))
-        torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
+        _save_pretrain_checkpoint(model, tokenizer, epoch_save_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
         logger.info("Saved pretrain checkpoint to %s", epoch_save_dir)
+        if improved:
+            if os.path.exists(best_dir):
+                shutil.rmtree(best_dir)
+            _save_pretrain_checkpoint(model, tokenizer, best_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
+            logger.info("Updated best pretrain checkpoint at %s", best_dir)
+        if should_stop:
+            logger.info("Early stopping triggered at epoch %s", epoch + 1)
+            break
+
+    if restore_best_checkpoint and os.path.exists(best_dir):
+        logger.info("Restoring best checkpoint from %s", best_dir)
+        load_qformer_bridge(model, best_dir, strict=True)
+        align_qformer_bridge_runtime(model)
+        load_trajectory_branch(model, best_dir, strict=True)
+        align_qformer_bridge_runtime(model)
 
 
 def main():
