@@ -64,11 +64,13 @@ from qformer_bridge import (
     attach_qformer_bridge,
     load_qformer_bridge,
     qformer_enabled,
+    read_qformer_bridge_metadata,
     save_qformer_bridge,
     trainable_parameter_summary,
 )
 from trajectory_branch import (
     load_trajectory_branch,
+    read_trajectory_branch_metadata,
     save_trajectory_branch,
     trajectory_enabled,
 )
@@ -88,6 +90,12 @@ def parse_args():
         type=str,
         default=None,
         help="Optional checkpoint dir to resume from. Omit this flag to train from the default LoRA/base setup.",
+    )
+    parser.add_argument(
+        "--pretrain_checkpoint",
+        type=str,
+        default=None,
+        help="Optional pretrain checkpoint dir or HF repo id. Loads only qformer_bridge + trajectory_branch, then initializes fresh LoRA.",
     )
     parser.add_argument("--start_epoch", type=int, default=None, help="Zero-based epoch index to resume from.")
     parser.add_argument("--start_step", type=int, default=None, help="Batch step inside the resume epoch.")
@@ -162,6 +170,32 @@ def build_fresh_lora_model(language_model, config, logger):
     )
     logger.info("Initializing a fresh LoRA adapter from config.")
     return get_peft_model(language_model, peft_config)
+
+
+def validate_pretrain_checkpoint_for_finetune(model, checkpoint_dir, logger):
+    bridge_metadata = read_qformer_bridge_metadata(checkpoint_dir)
+    traj_metadata = read_trajectory_branch_metadata(checkpoint_dir)
+
+    if not os.path.exists(os.path.join(checkpoint_dir, "qformer_bridge.safetensors")):
+        raise FileNotFoundError(f"Pretrain checkpoint is missing qformer_bridge.safetensors: {checkpoint_dir}")
+    if not os.path.exists(os.path.join(checkpoint_dir, "trajectory_branch.safetensors")):
+        raise FileNotFoundError(f"Pretrain checkpoint is missing trajectory_branch.safetensors: {checkpoint_dir}")
+
+    stages = {m.get("stage") for m in (bridge_metadata, traj_metadata) if m}
+    if stages:
+        if stages != {"pretrain"}:
+            raise ValueError(f"Pretrain checkpoint stage metadata mismatch: {sorted(stages)}")
+    else:
+        logger.warning("Pretrain checkpoint has no explicit stage metadata; treating it as a legacy pretrain-compatible checkpoint.")
+
+    checkpoint_mode = traj_metadata.get("fusion_mode")
+    current_mode = getattr(model, "trajectory_fusion_mode", None)
+    if checkpoint_mode and current_mode and checkpoint_mode != current_mode:
+        raise ValueError(
+            f"Pretrain checkpoint fusion mode mismatch: checkpoint={checkpoint_mode}, current={current_mode}"
+        )
+
+    return bridge_metadata, traj_metadata
 
 
 
@@ -589,7 +623,10 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.checkpoint and args.pretrain_checkpoint:
+        raise ValueError("Use either --checkpoint for finetune resume or --pretrain_checkpoint for pretrain preload, not both.")
     resume_dir, start_epoch, start_step = resolve_resume_config(args, config)
+    pretrain_checkpoint_dir = resolve_checkpoint_path(args.pretrain_checkpoint) if args.pretrain_checkpoint else None
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
 
@@ -638,6 +675,14 @@ if __name__ == "__main__":
         )
     else:
         model.language_model = build_fresh_lora_model(model.language_model, config, logger)
+        if pretrain_checkpoint_dir:
+            logger.info(f"Preloading qformer bridge + trajectory branch from pretrain checkpoint: {pretrain_checkpoint_dir}")
+            validate_pretrain_checkpoint_for_finetune(model, pretrain_checkpoint_dir, logger)
+            load_qformer_bridge(model, pretrain_checkpoint_dir, strict=True)
+            align_qformer_bridge_runtime(model)
+            if getattr(model, "trajectory_enabled", False):
+                load_trajectory_branch(model, pretrain_checkpoint_dir, strict=True)
+                align_qformer_bridge_runtime(model)
 
     model.language_model.print_trainable_parameters()
     model.train()
