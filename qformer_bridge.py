@@ -13,6 +13,7 @@ from huggingface_hub import hf_hub_download
 from trajectory_branch import (
     attach_trajectory_branch,
     build_trajectory_features,
+    build_trajectory_tokens_base,
 )
 
 
@@ -260,7 +261,17 @@ def _extract_feature_with_qformer(self, pixel_values):
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
     mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
-    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
+    dual_traj_tokens = None
+    dual_object_mask = None
+    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
+        dual_traj_tokens, dual_object_mask = build_trajectory_tokens_base(
+            self,
+            batch_size=mlp1_inputs.shape[0],
+            device=mlp1_inputs.device,
+        )
+        traj_cls = self.trajectory_cls_head(dual_traj_tokens, dual_object_mask).to(mlp1_inputs.dtype)
+        mlp1_inputs = mlp1_inputs + traj_cls
+    elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
         traj_cls = build_trajectory_features(
             self,
             batch_size=mlp1_inputs.shape[0],
@@ -277,6 +288,10 @@ def _extract_feature_with_qformer(self, pixel_values):
             device=visual_tokens.device,
         ).to(visual_tokens.dtype)
         visual_tokens = torch.cat([visual_tokens, traj_tokens], dim=1)
+    elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
+        traj_tokens = self.trajectory_token_projector(dual_traj_tokens)
+        traj_tokens = traj_tokens * dual_object_mask.to(traj_tokens.dtype).unsqueeze(-1)
+        visual_tokens = torch.cat([visual_tokens, traj_tokens.to(visual_tokens.dtype)], dim=1)
     return visual_tokens
 
 
