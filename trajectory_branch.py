@@ -1,5 +1,4 @@
 import json
-import math
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -18,10 +17,10 @@ TRAJECTORY_NUMERIC_DIM = 6
 TRAJECTORY_CANONICAL_FILENAME = "results_botsort_top6_sorted.json"
 TRAJECTORY_CANONICAL_JSONL_FILENAME = "results_botsort_top6_sorted.jsonl"
 TRAJECTORY_NUMERIC_FIELDS = (
-    "cx",
-    "cy",
-    "area",
-    "distance_norm",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
     "movement_angle",
     "speed_percent",
 )
@@ -69,7 +68,7 @@ def resolve_trajectory_source_path(source_file: str) -> str:
 def _normalize_flat_jsonl_records(records: List[Dict]) -> List[Dict]:
     grouped: Dict[Tuple[str, int], List[Dict]] = {}
     for idx, record in enumerate(records):
-        for field in ("folder_id", "frame_id", "label", "(cx, cy)", "area_norm", "distance_norm", "relative_position", "movement_angle", "speed_percent"):
+        for field in ("folder_id", "frame_id", "label", "boxs", "relative_position", "movement_angle", "speed_percent"):
             if field not in record:
                 raise ValueError(f"Flat trajectory jsonl row #{idx} is missing required field: {field}")
         key = (str(record["folder_id"]), int(record["frame_id"]))
@@ -83,20 +82,8 @@ def _normalize_flat_jsonl_records(records: List[Dict]) -> List[Dict]:
             )
         objects = []
         for row in rows:
-            cxcy = row["(cx, cy)"]
-            if not isinstance(cxcy, (list, tuple)) or len(cxcy) != 2:
-                raise ValueError(f"Invalid '(cx, cy)' value for {(folder_id, frame_id)}: {cxcy}")
             objects.append(
-                {
-                    "label": str(row["label"]),
-                    "relative_position": str(row["relative_position"]),
-                    "cx": float(cxcy[0]),
-                    "cy": float(cxcy[1]),
-                    "area": float(row["area_norm"]),
-                    "distance_norm": float(row["distance_norm"]),
-                    "movement_angle": float(row["movement_angle"]) / 180.0,
-                    "speed_percent": float(row["speed_percent"]),
-                }
+                _normalize_object_payload(row, key=(folder_id, frame_id), movement_is_degrees=True)
             )
         normalized_records.append(
             {
@@ -106,6 +93,36 @@ def _normalize_flat_jsonl_records(records: List[Dict]) -> List[Dict]:
             }
         )
     return normalized_records
+
+
+def _normalize_object_payload(obj: Dict, key: Optional[Tuple[str, int]] = None, movement_is_degrees: bool = False) -> Dict:
+    bbox = obj.get("boxs")
+    if bbox is not None:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError(f"Invalid 'boxs' value for {key or 'trajectory object'}: {bbox}")
+        x1, y1, x2, y2 = bbox
+    else:
+        missing = [field for field in ("x1", "y1", "x2", "y2") if field not in obj]
+        if missing:
+            raise ValueError(
+                f"Trajectory object in {key or 'record'} is missing bbox fields: {missing}"
+            )
+        x1, y1, x2, y2 = obj["x1"], obj["y1"], obj["x2"], obj["y2"]
+
+    movement_angle = float(obj["movement_angle"])
+    if movement_is_degrees:
+        movement_angle = movement_angle / 180.0
+
+    return {
+        "label": str(obj["label"]),
+        "relative_position": str(obj["relative_position"]),
+        "x1": float(x1),
+        "y1": float(y1),
+        "x2": float(x2),
+        "y2": float(y2),
+        "movement_angle": movement_angle,
+        "speed_percent": float(obj["speed_percent"]),
+    }
 
 
 def _empty_encoded_sample(
@@ -172,20 +189,23 @@ class TrajectorySource:
                 raise ValueError(
                     f"Trajectory record #{idx} has {len(objects)} objects; max is {TRAJECTORY_NUM_OBJECTS}."
                 )
+            normalized_objects = []
             for obj_idx, obj in enumerate(objects):
                 if not isinstance(obj, dict):
                     raise ValueError(f"Trajectory object #{obj_idx} in record #{idx} must be an object.")
-                missing = [field for field in ("label", "relative_position", *TRAJECTORY_NUMERIC_FIELDS) if field not in obj]
+                missing = [field for field in ("label", "relative_position", "movement_angle", "speed_percent") if field not in obj]
                 if missing:
                     raise ValueError(
                         f"Trajectory object #{obj_idx} in record #{idx} is missing required fields: {missing}"
                     )
-                labels.add(str(obj["label"]))
-                directions.add(str(obj["relative_position"]))
+                normalized = _normalize_object_payload(obj, key=(folder_id, frame_id), movement_is_degrees=False)
+                normalized_objects.append(normalized)
+                labels.add(str(normalized["label"]))
+                directions.add(str(normalized["relative_position"]))
             key = (folder_id, frame_id)
             if key in lookup:
                 raise ValueError(f"Duplicate trajectory key detected: {key}")
-            lookup[key] = objects
+            lookup[key] = normalized_objects
 
         label_to_id = {TRAJECTORY_PAD_UNK_LABEL: TRAJECTORY_PAD_UNK_ID}
         for offset, label in enumerate(sorted(labels), start=1):
@@ -219,13 +239,12 @@ class TrajectorySource:
         for slot, obj in enumerate(objects[: self.num_objects]):
             label_ids[slot] = self.label_to_id.get(str(obj["label"]), TRAJECTORY_PAD_UNK_ID)
             direction_ids[slot] = self.direction_to_id.get(str(obj["relative_position"]), TRAJECTORY_PAD_UNK_ID)
-            area_value = max(float(obj["area"]), 0.0)
             numeric_feats[slot] = torch.tensor(
                 [
-                    float(obj["cx"]),
-                    float(obj["cy"]),
-                    math.sqrt(area_value),
-                    float(obj["distance_norm"]),
+                    float(obj["x1"]),
+                    float(obj["y1"]),
+                    float(obj["x2"]),
+                    float(obj["y2"]),
                     float(obj["movement_angle"]),
                     float(obj["speed_percent"]),
                 ],
@@ -361,7 +380,7 @@ def attach_trajectory_branch(
         raise ValueError("Trajectory branch requires qformer.enabled=true in this v1 implementation.")
 
     fusion_mode = str(traj_cfg["fusion_mode"])
-    if fusion_mode not in {"cls_add", "concat"}:
+    if fusion_mode not in {"cls_add", "concat", "dual"}:
         raise ValueError(f"Unsupported trajectory fusion_mode: {fusion_mode}")
 
     source = TrajectorySource.from_file(str(traj_cfg["source_file"]))
@@ -449,19 +468,28 @@ def _get_trajectory_inputs(self, batch_size: int, device: torch.device):
     )
 
 
-def build_trajectory_features(model, batch_size: int, device: torch.device):
+def build_trajectory_tokens_base(model, batch_size: int, device: torch.device):
     label_ids, direction_ids, numeric_feats, object_mask = model.get_trajectory_inputs(batch_size, device)
-    traj_tokens_base = model.trajectory_backbone(
+    return model.trajectory_backbone(
         label_ids=label_ids,
         direction_ids=direction_ids,
         numeric_feats=numeric_feats,
         object_mask=object_mask,
-    )
+    ), object_mask
+
+
+def build_trajectory_features(model, batch_size: int, device: torch.device):
+    traj_tokens_base, object_mask = build_trajectory_tokens_base(model, batch_size, device)
     if model.trajectory_fusion_mode == "cls_add":
         return model.trajectory_cls_head(traj_tokens_base, object_mask)
     if model.trajectory_fusion_mode == "concat":
         projected = model.trajectory_token_projector(traj_tokens_base)
         return projected * object_mask.to(projected.dtype).unsqueeze(-1)
+    if model.trajectory_fusion_mode == "dual":
+        cls_output = model.trajectory_cls_head(traj_tokens_base, object_mask)
+        token_output = model.trajectory_token_projector(traj_tokens_base)
+        token_output = token_output * object_mask.to(token_output.dtype).unsqueeze(-1)
+        return cls_output, token_output
     raise ValueError(f"Unsupported trajectory fusion_mode: {model.trajectory_fusion_mode}")
 
 

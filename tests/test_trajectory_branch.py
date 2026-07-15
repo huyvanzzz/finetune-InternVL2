@@ -36,21 +36,21 @@ def test_trajectory_source_builds_stable_vocab_and_exact_join(tmp_path):
                     {
                         "label": "chair",
                         "relative_position": "12 o'clock",
-                        "cx": 0.5,
-                        "cy": 0.4,
-                        "area": 0.1,
-                        "distance_norm": 0.2,
-                        "movement_angle": 15.0,
+                        "x1": 0.1,
+                        "y1": 0.2,
+                        "x2": 0.5,
+                        "y2": 0.4,
+                        "movement_angle": 15.0 / 180.0,
                         "speed_percent": 0.3,
                     },
                     {
                         "label": "pedestrian",
                         "relative_position": "10 o'clock",
-                        "cx": 0.2,
-                        "cy": 0.6,
-                        "area": 0.05,
-                        "distance_norm": 0.3,
-                        "movement_angle": 2.0,
+                        "x1": 0.2,
+                        "y1": 0.3,
+                        "x2": 0.6,
+                        "y2": 0.7,
+                        "movement_angle": 2.0 / 180.0,
                         "speed_percent": 0.1,
                     },
                 ],
@@ -120,9 +120,7 @@ def test_trajectory_source_accepts_flat_jsonl_and_normalizes_fields(tmp_path):
             "frame_id": 8,
             "track_id": 1,
             "label": "chair",
-            "(cx, cy)": [0.5, 0.4],
-            "area_norm": 0.1,
-            "distance_norm": 0.2,
+            "boxs": [0.1, 0.2, 0.5, 0.4],
             "relative_position": "12 o'clock",
             "movement_angle": 15.0,
             "speed_percent": 0.3,
@@ -132,9 +130,7 @@ def test_trajectory_source_accepts_flat_jsonl_and_normalizes_fields(tmp_path):
             "frame_id": 8,
             "track_id": 2,
             "label": "pedestrian",
-            "(cx, cy)": [0.2, 0.6],
-            "area_norm": 0.05,
-            "distance_norm": 0.3,
+            "boxs": [0.2, 0.3, 0.6, 0.7],
             "relative_position": "10 o'clock",
             "movement_angle": 2.0,
             "speed_percent": 0.1,
@@ -147,8 +143,8 @@ def test_trajectory_source_accepts_flat_jsonl_and_normalizes_fields(tmp_path):
 
     assert encoded["trajectory_label_ids"].tolist() == [1, 2, 0, 0, 0, 0]
     assert encoded["trajectory_direction_ids"].tolist() == [2, 1, 0, 0, 0, 0]
-    assert encoded["trajectory_numeric_feats"][0].tolist() == pytest.approx([0.5, 0.4, 0.1 ** 0.5, 0.2, 15.0 / 180.0, 0.3])
-    assert encoded["trajectory_numeric_feats"][1].tolist() == pytest.approx([0.2, 0.6, 0.05 ** 0.5, 0.3, 2.0 / 180.0, 0.1])
+    assert encoded["trajectory_numeric_feats"][0].tolist() == pytest.approx([0.1, 0.2, 0.5, 0.4, 15.0 / 180.0, 0.3])
+    assert encoded["trajectory_numeric_feats"][1].tolist() == pytest.approx([0.2, 0.3, 0.6, 0.7, 2.0 / 180.0, 0.1])
 
 
 def test_trajectory_source_rejects_invalid_record_format(tmp_path):
@@ -162,7 +158,7 @@ def test_trajectory_source_rejects_invalid_record_format(tmp_path):
                 "objects": [
                     {
                         "label": "chair",
-                        "cx": 0.4,
+                        "x1": 0.1,
                     }
                 ],
             }
@@ -288,3 +284,12 @@ def test_attach_trajectory_branch_updates_num_image_token_by_mode(tmp_path):
         llm_hidden_size=896,
     )
     assert concat_model.num_image_token == 38
+
+    dual_model = _AttachDummy()
+    attach_trajectory_branch(
+        dual_model,
+        {**base_cfg, "trajectory": {**base_cfg["trajectory"], "fusion_mode": "dual"}},
+        pixel_shuffle_dim=1024,
+        llm_hidden_size=896,
+    )
+    assert dual_model.num_image_token == 38
