@@ -1,0 +1,100 @@
+experiment:
+  name: "wad_internvl_pretrain_traj_cls"
+  version: "1.0"
+  description: "InternVL2-2B trajectory pretrain with cls_add fusion"
+  tags: ["internvl2", "pretrain", "trajectory", "cls_add"]
+
+model:
+  architecture: "internvl"
+  name: "OpenGVLab/InternVL2_5-2B"
+  trust_remote_code: true
+  multimodal_max_length: 8192
+
+  qformer:
+    enabled: true
+    source_model: "Salesforce/instructblip-flan-t5-xl"
+    cache_dir: "./qformer_cache"
+    num_query_tokens: 32
+    freeze_qformer: true
+    freeze_mlp1: true
+    prompt_aware: true
+    max_text_length: 128
+    train_lora_llm: false
+    bridge_mode: "prompt_aware_preproj_mlp1"
+
+  lora:
+    enabled: false
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - "wqkv"
+      - "wo"
+      - "w1"
+      - "w2"
+      - "w3"
+    bias: "none"
+    task_type: "CAUSAL_LM"
+
+  quantization:
+    enabled: true
+    bits: 4
+    type: "nf4"
+    double_quant: true
+    compute_dtype: "bfloat16"
+
+  vision:
+    freeze_encoder: true
+    min_pixels: 256
+    max_pixels: 1280
+    image_size: [448, 448]
+
+trajectory:
+  enabled: true
+  fusion_mode: "cls_add"
+  source_file: "json"
+  num_objects: 6
+  d_cat: 32
+  d_numeric_hidden: 64
+  d_traj: 128
+  num_heads: 4
+  num_layers: 2
+  ffn_dim: 256
+
+pretrain:
+  question_train_file: "./json/question_train.jsonl"
+  frame_index_file: "./wad_dataset/frame_index.pkl"
+  val_split_ratio: 0.2
+  val_split_seed: 42
+  movement_enabled: true
+
+data:
+  name: "minhdang0901/WAD_Images_All_Size"
+  num_frames: 1
+  seed: 42
+  response_format: "direct_text"
+
+training:
+  output_dir: "./outputs/pretrain_traj_cls"
+  num_epochs: 5
+  batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2e-4
+  proj_learning_rate: 5e-4
+  warmup_steps: 50
+  weight_decay: 0.01
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  optimizer: "adamw"
+  lr_scheduler: "cosine"
+  max_grad_norm: 1.0
+  logging_steps: 10
+  log_token_stats: true
+  token_log_batches: 2
+
+hardware:
+  device: "cuda"
+  num_workers: 0
+  pin_memory: false
+  cuda_alloc_conf: "expandable_segments:True"

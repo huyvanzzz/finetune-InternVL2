@@ -516,9 +516,21 @@ def save_trajectory_branch(model, output_dir: str):
         "num_objects": getattr(model, "trajectory_num_objects", TRAJECTORY_NUM_OBJECTS),
         "qformer_token_count": getattr(model, "trajectory_qformer_token_count", None),
         "num_image_token": getattr(model, "num_image_token", None),
+        "stage": getattr(model, "pretrain_stage", getattr(model, "training_stage", None)),
+        "movement_enabled": getattr(model, "pretrain_movement_enabled", None),
+        "pretrain_data_source": getattr(model, "pretrain_data_source", None),
+        "question_format_version": getattr(model, "question_format_version", None),
     }
     with open(os.path.join(output_dir, TRAJECTORY_BRANCH_CONFIG_NAME), "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+
+def read_trajectory_branch_metadata(checkpoint_dir: str) -> Dict:
+    config_path = os.path.join(checkpoint_dir, TRAJECTORY_BRANCH_CONFIG_NAME)
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_trajectory_branch(model, checkpoint_dir: str, strict: bool = True):
