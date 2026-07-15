@@ -76,13 +76,19 @@ data:
 
 training:
   output_dir: "./outputs/pretrain_traj_cls"
-  num_epochs: 5
-  batch_size: 2
-  gradient_accumulation_steps: 8
-  learning_rate: 2e-4
-  proj_learning_rate: 5e-4
-  warmup_steps: 50
+  num_epochs: 100
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1e-5
+  trajectory_learning_rate: 1e-4
+  bridge_learning_rate: 3e-5
+  warmup_ratio: 0.1
+  warmup_min_steps: 20
+  warmup_max_steps: 100
   weight_decay: 0.01
+  early_stopping_patience: 12
+  early_stopping_min_delta: 0.005
+  restore_best_checkpoint: true
   bf16: true
   fp16: false
   gradient_checkpointing: true
