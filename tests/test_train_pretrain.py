@@ -8,6 +8,7 @@ from train_pretrain import (
     PretrainCollaterFn,
     _build_optimizer,
     forward_pretrain_batch,
+    infer_resume_position,
     resolve_warmup_steps,
 )
 
@@ -276,3 +277,14 @@ def test_run_pretrain_training_tracks_metrics_without_nameerror(tmp_path, monkey
 
     metrics = (tmp_path / "metrics.json").read_text(encoding="utf-8")
     assert '"val_loss"' in metrics
+
+
+def test_infer_resume_position_reads_last_training_state(tmp_path):
+    last_dir = tmp_path / "last"
+    last_dir.mkdir()
+    (last_dir / "training_state.json").write_text(
+        '{"next_epoch": 3, "next_step": 0}',
+        encoding="utf-8",
+    )
+
+    assert infer_resume_position(str(last_dir)) == (3, 0)

@@ -82,6 +82,8 @@ def test_train_pretrain_supports_resume_checkpoint_surface():
     assert 'optimizer.pt' in content
     assert 'scheduler.pt' in content
     assert 'Resuming pretrain' in content or 'resume pretrain' in content.lower()
+    assert '"last"' in content or "'last'" in content
+    assert 'training_state.json' in content
 
 
 def test_run_pretrain_notebook_exists_and_targets_pretrain_branch():

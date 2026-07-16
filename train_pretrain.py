@@ -280,6 +280,12 @@ def resolve_checkpoint_path(checkpoint: str | None, logger=None):
 
 
 def infer_resume_position(checkpoint_dir):
+    state_path = os.path.join(checkpoint_dir, "training_state.json")
+    if os.path.exists(state_path):
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        return int(state.get("next_epoch", 0)), int(state.get("next_step", 0))
+
     name = os.path.basename(os.path.normpath(checkpoint_dir))
     step_match = re.fullmatch(r"epoch_(\d+)_step_(\d+)", name)
     if step_match:
@@ -497,6 +503,12 @@ def _save_pretrain_checkpoint(model, tokenizer, output_dir: str, optimizer=None,
         torch.save(lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 
 
+def _write_training_state(output_dir: str, next_epoch: int, next_step: int = 0):
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "training_state.json"), "w", encoding="utf-8") as f:
+        json.dump({"next_epoch": int(next_epoch), "next_step": int(next_step)}, f, indent=2, ensure_ascii=False)
+
+
 def _log_error_stats(logger, prefix: str, stats: Dict):
     logger.info(
         "%s sample errors | count=%s | rate=%.4f | requested=%s",
@@ -606,6 +618,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
     min_delta = float(config["training"].get("early_stopping_min_delta", 0.0))
     restore_best_checkpoint = bool(config["training"].get("restore_best_checkpoint", True))
     best_dir = os.path.join(output_dir, "best")
+    last_dir = os.path.join(output_dir, "last")
     early_stopping = EarlyStoppingState(patience=patience, min_delta=min_delta) if patience > 0 else None
     metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -698,13 +711,16 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
 
-        epoch_save_dir = os.path.join(output_dir, f"epoch_{epoch + 1}")
-        _save_pretrain_checkpoint(model, tokenizer, epoch_save_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
-        logger.info("Saved pretrain checkpoint to %s", epoch_save_dir)
+        if os.path.exists(last_dir):
+            shutil.rmtree(last_dir)
+        _save_pretrain_checkpoint(model, tokenizer, last_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
+        _write_training_state(last_dir, next_epoch=epoch + 1, next_step=0)
+        logger.info("Saved latest pretrain checkpoint to %s", last_dir)
         if improved:
             if os.path.exists(best_dir):
                 shutil.rmtree(best_dir)
             _save_pretrain_checkpoint(model, tokenizer, best_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
+            _write_training_state(best_dir, next_epoch=epoch + 1, next_step=0)
             logger.info("Updated best pretrain checkpoint at %s", best_dir)
         if should_stop:
             logger.info("Early stopping triggered at epoch %s", epoch + 1)
