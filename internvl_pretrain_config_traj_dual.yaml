@@ -76,9 +76,9 @@ data:
 
 training:
   output_dir: "./outputs/pretrain_traj_dual"
-  num_epochs: 100
-  batch_size: 2
-  gradient_accumulation_steps: 8
+  num_epochs: 50
+  batch_size: 4
+  gradient_accumulation_steps: 4
   learning_rate: 1e-5
   trajectory_learning_rate: 1e-4
   bridge_learning_rate: 3e-5
@@ -86,7 +86,7 @@ training:
   warmup_min_steps: 20
   warmup_max_steps: 100
   weight_decay: 0.01
-  early_stopping_patience: 12
+  early_stopping_patience: 8
   early_stopping_min_delta: 0.005
   restore_best_checkpoint: true
   bf16: true
