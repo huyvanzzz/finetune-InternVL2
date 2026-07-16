@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from pretrain_checkpoint_verify import verify_loaded_pretrain_modules
 from qformer_bridge import BRIDGE_CONFIG_NAME, save_qformer_bridge
 from trajectory_branch import TRAJECTORY_BRANCH_CONFIG_NAME, save_trajectory_branch
 
@@ -94,3 +95,48 @@ def test_run_pretrain_notebook_exists_and_targets_pretrain_branch():
     assert 'TARGET_BRANCH = "feature/trajectory-pretrain-qformer"' in cell0
     assert 'CONFIG_PATH = "internvl_pretrain_config_traj_cls.yaml"' in cell0
     assert 'train_pretrain.py' in train_cell
+
+
+class _TinyCombined(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qformer_enabled = True
+        self.qformer_source_model = "dummy-source"
+        self.qformer_num_query_tokens = 32
+        self.trajectory_enabled = True
+        self.qformer_input_proj = torch.nn.Linear(4, 4)
+        self.qformer_to_mlp1_proj = torch.nn.Linear(4, 4)
+        self.trajectory_fusion_mode = "dual"
+        self.trajectory_source_file = "json/results_botsort_top6_sorted.jsonl"
+        self.trajectory_num_objects = 6
+        self.trajectory_qformer_token_count = 32
+        self.num_image_token = 38
+        self.trajectory_backbone = torch.nn.Linear(4, 4)
+        self.trajectory_cls_head = torch.nn.Linear(4, 4)
+        self.trajectory_token_projector = torch.nn.Linear(4, 4)
+
+
+def test_verify_loaded_pretrain_modules_detects_exact_tensor_match(tmp_path):
+    model = _TinyCombined()
+    save_qformer_bridge(model, str(tmp_path))
+    save_trajectory_branch(model, str(tmp_path))
+
+    result = verify_loaded_pretrain_modules(model, str(tmp_path))
+
+    assert result["bridge"]["all_matched"] is True
+    assert result["trajectory"]["all_matched"] is True
+    assert result["bridge"]["checked_keys"]
+    assert result["trajectory"]["checked_keys"]
+
+
+def test_verify_loaded_pretrain_modules_detects_mismatch(tmp_path):
+    model = _TinyCombined()
+    save_qformer_bridge(model, str(tmp_path))
+    save_trajectory_branch(model, str(tmp_path))
+    with torch.no_grad():
+        model.qformer_input_proj.weight.add_(1.0)
+
+    result = verify_loaded_pretrain_modules(model, str(tmp_path))
+
+    assert result["bridge"]["all_matched"] is False
+    assert any(not item["matched"] for item in result["bridge"]["checked_keys"])

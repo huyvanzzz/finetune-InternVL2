@@ -26,6 +26,7 @@ from optimizer_state_utils import (
     move_optimizer_state_to_param_device,
     sanitize_optimizer_state_dict,
 )
+from pretrain_checkpoint_verify import verify_loaded_pretrain_modules
 
 
 def set_seed(seed=42):
@@ -196,6 +197,28 @@ def validate_pretrain_checkpoint_for_finetune(model, checkpoint_dir, logger):
         )
 
     return bridge_metadata, traj_metadata
+
+
+def log_pretrain_checkpoint_verification(model, checkpoint_dir, logger):
+    verification = verify_loaded_pretrain_modules(model, checkpoint_dir)
+    for section_name in ("bridge", "trajectory"):
+        section = verification[section_name]
+        logger.info(
+            "Pretrain %s verification | all_matched=%s | checked=%s",
+            section_name,
+            section["all_matched"],
+            len(section["checked_keys"]),
+        )
+        for item in section["checked_keys"]:
+            logger.info(
+                "Pretrain %s key check | key=%s | matched=%s | model_norm=%.6f | checkpoint_norm=%.6f",
+                section_name,
+                item["key"],
+                item["matched"],
+                item["model_norm"],
+                item["checkpoint_norm"],
+            )
+    return verification
 
 
 
@@ -683,6 +706,7 @@ if __name__ == "__main__":
             if getattr(model, "trajectory_enabled", False):
                 load_trajectory_branch(model, pretrain_checkpoint_dir, strict=True)
                 align_qformer_bridge_runtime(model)
+            log_pretrain_checkpoint_verification(model, pretrain_checkpoint_dir, logger)
 
     model.language_model.print_trainable_parameters()
     model.train()
