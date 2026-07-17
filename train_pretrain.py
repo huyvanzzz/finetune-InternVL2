@@ -45,6 +45,7 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
+EARLY_STOPPING_STATE_FILENAME = "early_stopping_state.json"
 
 
 @dataclass
@@ -272,6 +273,8 @@ def resolve_checkpoint_path(checkpoint: str | None, logger=None):
             "trajectory_branch_config.json",
             "optimizer.pt",
             "scheduler.pt",
+            "training_state.json",
+            EARLY_STOPPING_STATE_FILENAME,
             "tokenizer*",
             "special_tokens_map.json",
             "added_tokens.json",
@@ -307,10 +310,20 @@ def resolve_resume_config(args, logger):
     start_epoch = args.start_epoch
     start_step = args.start_step
     inferred_epoch, inferred_step = infer_resume_position(checkpoint) if checkpoint else (None, None)
+    if checkpoint and logger:
+        logger.info("Resolved pretrain resume checkpoint path: %s", checkpoint)
+        logger.info(
+            "Resume state discovery | training_state.json=%s | inferred_epoch=%s | inferred_step=%s",
+            os.path.exists(os.path.join(checkpoint, "training_state.json")),
+            inferred_epoch if inferred_epoch is not None else "missing",
+            inferred_step if inferred_step is not None else "missing",
+        )
     if start_epoch is None:
         start_epoch = inferred_epoch if inferred_epoch is not None else 0
     if start_step is None:
         start_step = inferred_step if inferred_step is not None else 0
+    if checkpoint and logger:
+        logger.info("Final pretrain resume position | start_epoch=%s | start_step=%s", start_epoch, start_step)
     return checkpoint, int(start_epoch or 0), int(start_step or 0)
 
 
@@ -509,6 +522,38 @@ def _write_training_state(output_dir: str, next_epoch: int, next_step: int = 0):
         json.dump({"next_epoch": int(next_epoch), "next_step": int(next_step)}, f, indent=2, ensure_ascii=False)
 
 
+def _write_early_stopping_state(output_dir: str, early_stopping: EarlyStoppingState):
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, EARLY_STOPPING_STATE_FILENAME), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "patience": int(early_stopping.patience),
+                "min_delta": float(early_stopping.min_delta),
+                "best_val_loss": None if early_stopping.best_val_loss is None else float(early_stopping.best_val_loss),
+                "best_epoch": None if early_stopping.best_epoch is None else int(early_stopping.best_epoch),
+                "num_bad_epochs": int(early_stopping.num_bad_epochs),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
+def _load_early_stopping_state(checkpoint_dir: str) -> EarlyStoppingState | None:
+    state_path = os.path.join(checkpoint_dir, EARLY_STOPPING_STATE_FILENAME)
+    if not os.path.exists(state_path):
+        return None
+    with open(state_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return EarlyStoppingState(
+        patience=int(payload["patience"]),
+        min_delta=float(payload["min_delta"]),
+        best_val_loss=None if payload.get("best_val_loss") is None else float(payload["best_val_loss"]),
+        best_epoch=None if payload.get("best_epoch") is None else int(payload["best_epoch"]),
+        num_bad_epochs=int(payload.get("num_bad_epochs", 0)),
+    )
+
+
 def _log_error_stats(logger, prefix: str, stats: Dict):
     logger.info(
         "%s sample errors | count=%s | rate=%.4f | requested=%s",
@@ -642,6 +687,25 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
         else:
             logger.warning("No optimizer/scheduler states found in pretrain checkpoint. Starting with fresh optimizer states.")
 
+        if early_stopping is not None:
+            restored_early_stopping = _load_early_stopping_state(resume_dir)
+            if restored_early_stopping is None:
+                logger.warning(
+                    "No %s found in pretrain checkpoint. Early stopping state will restart from scratch.",
+                    EARLY_STOPPING_STATE_FILENAME,
+                )
+            else:
+                early_stopping.best_val_loss = restored_early_stopping.best_val_loss
+                early_stopping.best_epoch = restored_early_stopping.best_epoch
+                early_stopping.num_bad_epochs = restored_early_stopping.num_bad_epochs
+                logger.info(
+                    "Restored early stopping state | best_epoch=%s | best_val_loss=%s | bad_epochs=%s/%s",
+                    early_stopping.best_epoch,
+                    f"{early_stopping.best_val_loss:.4f}" if early_stopping.best_val_loss is not None else "None",
+                    early_stopping.num_bad_epochs,
+                    early_stopping.patience,
+                )
+
     for epoch in range(start_epoch, epochs):
         model.train()
         if getattr(model, "qformer_enabled", False):
@@ -715,12 +779,16 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
             shutil.rmtree(last_dir)
         _save_pretrain_checkpoint(model, tokenizer, last_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
         _write_training_state(last_dir, next_epoch=epoch + 1, next_step=0)
+        if early_stopping is not None:
+            _write_early_stopping_state(last_dir, early_stopping)
         logger.info("Saved latest pretrain checkpoint to %s", last_dir)
         if improved:
             if os.path.exists(best_dir):
                 shutil.rmtree(best_dir)
             _save_pretrain_checkpoint(model, tokenizer, best_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
             _write_training_state(best_dir, next_epoch=epoch + 1, next_step=0)
+            if early_stopping is not None:
+                _write_early_stopping_state(best_dir, early_stopping)
             logger.info("Updated best pretrain checkpoint at %s", best_dir)
         if should_stop:
             logger.info("Early stopping triggered at epoch %s", epoch + 1)
