@@ -1,10 +1,14 @@
 import argparse
+import copy
 import datetime
+import importlib.metadata
 import json
 import os
 import random
 import re
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass
 from math import floor
 from typing import Dict
@@ -12,6 +16,7 @@ from typing import Dict
 import numpy as np
 import torch
 import yaml
+from accelerate import Accelerator
 from huggingface_hub import snapshot_download
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
@@ -48,6 +53,17 @@ SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 EARLY_STOPPING_STATE_FILENAME = "early_stopping_state.json"
 
 
+class SilentLogger:
+    def info(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+
 @dataclass
 class EarlyStoppingState:
     patience: int
@@ -74,6 +90,176 @@ def set_seed(seed=42):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def _package_versions() -> Dict[str, str]:
+    packages = ("torch", "transformers", "accelerate", "bitsandbytes", "flash-attn")
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = "not-installed"
+    return versions
+
+
+def _build_run_metadata(config: Dict, global_optimizer_step: int = 0) -> Dict:
+    return {
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "global_optimizer_step": int(global_optimizer_step),
+        "git_commit": _git_commit(),
+        "package_versions": _package_versions(),
+        "config_snapshot": copy.deepcopy(config),
+    }
+
+
+def _write_run_metadata(output_dir: str, metadata: Dict):
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "pretrain_run_metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+
+def build_dataloader_kwargs(config: Dict) -> Dict:
+    hardware_cfg = config.get("hardware", {})
+    num_workers = int(hardware_cfg.get("num_workers", hardware_cfg.get("num_workers_per_process", 0)))
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": bool(hardware_cfg.get("pin_memory", False)),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(hardware_cfg.get("persistent_workers", False))
+        if "prefetch_factor" in hardware_cfg:
+            kwargs["prefetch_factor"] = int(hardware_cfg["prefetch_factor"])
+    return kwargs
+
+
+def inspect_optimizer_param_groups(model, optimizer) -> Dict:
+    trainable = {id(p): name for name, p in model.named_parameters() if p.requires_grad}
+    seen = {}
+    duplicate_names = []
+    for group_idx, group in enumerate(optimizer.param_groups):
+        for param in group["params"]:
+            param_id = id(param)
+            if param_id in seen and param_id in trainable:
+                duplicate_names.append(trainable[param_id])
+            seen[param_id] = group_idx
+
+    missing_names = [name for param_id, name in trainable.items() if param_id not in seen]
+    return {
+        "missing_param_names": sorted(missing_names),
+        "duplicate_param_names": sorted(set(duplicate_names)),
+        "trainable_param_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
+    }
+
+
+def log_optimizer_param_group_health(model, optimizer, logger):
+    report = inspect_optimizer_param_groups(model, optimizer)
+    logger.info(
+        "Optimizer health | trainable_params=%s | missing=%s | duplicates=%s",
+        report["trainable_param_count"],
+        len(report["missing_param_names"]),
+        len(report["duplicate_param_names"]),
+    )
+    if report["missing_param_names"]:
+        logger.warning("Optimizer missing trainable params: %s", report["missing_param_names"][:20])
+    if report["duplicate_param_names"]:
+        logger.warning("Optimizer duplicate trainable params: %s", report["duplicate_param_names"][:20])
+    return report
+
+
+def verify_flash_attention_runtime(model) -> Dict:
+    modules = []
+    for name, module in model.named_modules():
+        if hasattr(module, "use_flash_attn"):
+            requested = bool(getattr(getattr(module, "config", None), "use_flash_attn", False))
+            enabled = bool(getattr(module, "use_flash_attn", False))
+            modules.append(
+                {
+                    "module": name,
+                    "requested": requested,
+                    "enabled": enabled,
+                    "status": "flash" if enabled else "fallback",
+                    "fallback_reason": None if enabled else "use_flash_attn is false at runtime",
+                }
+            )
+    return {
+        "supported_count": len(modules),
+        "flash_enabled_count": sum(1 for item in modules if item["enabled"]),
+        "fallback_count": sum(1 for item in modules if not item["enabled"]),
+        "modules": modules,
+    }
+
+
+def log_flash_attention_runtime(model, logger):
+    report = verify_flash_attention_runtime(model)
+    logger.info(
+        "FlashAttention runtime | supported=%s | flash=%s | fallback=%s",
+        report["supported_count"],
+        report["flash_enabled_count"],
+        report["fallback_count"],
+    )
+    for item in report["modules"][:20]:
+        logger.info(
+            "FlashAttention module | name=%s | requested=%s | status=%s | reason=%s",
+            item["module"],
+            item["requested"],
+            item["status"],
+            item["fallback_reason"],
+        )
+    return report
+
+
+def reduce_token_weighted_loss(loss_sum: torch.Tensor, token_count: torch.Tensor, accelerator=None) -> torch.Tensor:
+    loss_sum = loss_sum.to(dtype=torch.float32)
+    token_count = token_count.to(dtype=torch.float32)
+    if accelerator is not None:
+        loss_sum = accelerator.reduce(loss_sum, reduction="sum")
+        token_count = accelerator.reduce(token_count, reduction="sum")
+    return loss_sum / token_count.clamp_min(1.0)
+
+
+def count_valid_target_tokens(batch) -> torch.Tensor:
+    labels = batch[1]
+    return (labels != -100).sum().to(dtype=torch.float32)
+
+
+def log_gradient_health(model, logger, max_names: int = 20):
+    branch_sums = {
+        "trajectory": 0.0,
+        "bridge": 0.0,
+        "other": 0.0,
+    }
+    grad_none = []
+    bad_grad = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.grad is None:
+            grad_none.append(name)
+            continue
+        grad = param.grad.detach()
+        if not torch.isfinite(grad).all():
+            bad_grad.append(name)
+            continue
+        norm = float(grad.float().norm().item())
+        if "trajectory_" in name:
+            branch_sums["trajectory"] += norm
+        elif "qformer_input_proj" in name or "qformer_to_mlp1_proj" in name:
+            branch_sums["bridge"] += norm
+        else:
+            branch_sums["other"] += norm
+    logger.info("Gradient health | norms=%s | grad_none=%s | bad_grad=%s", branch_sums, len(grad_none), len(bad_grad))
+    if grad_none:
+        logger.warning("Trainable params with grad=None: %s", grad_none[:max_names])
+    if bad_grad:
+        logger.warning("Trainable params with NaN/Inf gradients: %s", bad_grad[:max_names])
 
 
 class PretrainCollaterFn:
@@ -283,10 +469,8 @@ def resolve_checkpoint_path(checkpoint: str | None, logger=None):
 
 
 def infer_resume_position(checkpoint_dir):
-    state_path = os.path.join(checkpoint_dir, "training_state.json")
-    if os.path.exists(state_path):
-        with open(state_path, "r", encoding="utf-8") as f:
-            state = json.load(f)
+    state = read_training_state(checkpoint_dir)
+    if state is not None:
         return int(state.get("next_epoch", 0)), int(state.get("next_step", 0))
 
     name = os.path.basename(os.path.normpath(checkpoint_dir))
@@ -302,6 +486,14 @@ def infer_resume_position(checkpoint_dir):
         return epoch_num, 0
 
     return None, None
+
+
+def read_training_state(checkpoint_dir):
+    state_path = os.path.join(checkpoint_dir, "training_state.json")
+    if not os.path.exists(state_path):
+        return None
+    with open(state_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def resolve_resume_config(args, logger):
@@ -347,12 +539,25 @@ def build_model_and_tokenizer(config: Dict, logger):
     )
 
     logger.info("Loading model %s in pretrain mode...", model_name_or_path)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device_map = None
+    if config["model"]["quantization"]["enabled"] and world_size > 1 and torch.cuda.is_available():
+        device_map = {"": local_rank}
+        logger.info("Using explicit LOCAL_RANK device_map for 4-bit distributed training: %s", device_map)
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "quantization_config": quantization_config,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": config["model"]["trust_remote_code"],
+    }
+    if device_map is not None:
+        model_kwargs["device_map"] = device_map
+    if "attn_implementation" in config["model"]:
+        model_kwargs["attn_implementation"] = config["model"]["attn_implementation"]
     model = AutoModel.from_pretrained(
         model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        low_cpu_mem_usage=True,
-        trust_remote_code=config["model"]["trust_remote_code"],
+        **model_kwargs,
     )
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
@@ -409,13 +614,17 @@ def _freeze_modules_for_pretrain(model):
 
 def build_dataloaders(config: Dict, model, tokenizer):
     pretrain_cfg = config["pretrain"]
-    train_dataset, val_dataset = build_pretrain_datasets(
+    train_dataset, val_dataset, test_dataset, split_stats = build_pretrain_datasets(
         question_train_file=pretrain_cfg["question_train_file"],
         frame_index_path=pretrain_cfg.get("frame_index_file", DEFAULT_FRAME_INDEX_PATH),
         trajectory_source=build_trajectory_source_from_config(config),
         val_split_ratio=float(pretrain_cfg["val_split_ratio"]),
         val_split_seed=int(pretrain_cfg["val_split_seed"]),
         movement_enabled=bool(pretrain_cfg["movement_enabled"]),
+        train_split_ratio=float(pretrain_cfg.get("train_split_ratio", 0.8)),
+        test_split_ratio=float(pretrain_cfg.get("test_split_ratio", 0.1)),
+        question_val_file=pretrain_cfg.get("question_val_file"),
+        question_test_file=pretrain_cfg.get("question_test_file"),
     )
 
     collate_fn = PretrainCollaterFn(tokenizer, model)
@@ -423,22 +632,22 @@ def build_dataloaders(config: Dict, model, tokenizer):
     collate_fn.token_log_remaining = int(config["training"].get("token_log_batches", 0))
 
     batch_size = int(config["training"]["batch_size"])
-    num_workers = int(config["hardware"].get("num_workers", 0))
+    dataloader_kwargs = build_dataloader_kwargs(config)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=num_workers,
+        **dataloader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=num_workers,
+        **dataloader_kwargs,
     )
-    return train_dataset, val_dataset, train_loader, val_loader
+    return train_dataset, val_dataset, test_dataset, split_stats, train_loader, val_loader
 
 
 def resolve_warmup_steps(config: Dict, total_training_steps: int) -> int:
@@ -505,7 +714,7 @@ def _build_optimizer(model, config: Dict, logger):
     return optimizer
 
 
-def _save_pretrain_checkpoint(model, tokenizer, output_dir: str, optimizer=None, lr_scheduler=None):
+def _save_pretrain_checkpoint(model, tokenizer, output_dir: str, optimizer=None, lr_scheduler=None, run_metadata=None):
     os.makedirs(output_dir, exist_ok=True)
     save_qformer_bridge(model, output_dir)
     save_trajectory_branch(model, output_dir)
@@ -514,12 +723,23 @@ def _save_pretrain_checkpoint(model, tokenizer, output_dir: str, optimizer=None,
         torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
     if lr_scheduler is not None:
         torch.save(lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+    if run_metadata is not None:
+        _write_run_metadata(output_dir, run_metadata)
 
 
-def _write_training_state(output_dir: str, next_epoch: int, next_step: int = 0):
+def _write_training_state(output_dir: str, next_epoch: int, next_step: int = 0, global_optimizer_step: int = 0):
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, "training_state.json"), "w", encoding="utf-8") as f:
-        json.dump({"next_epoch": int(next_epoch), "next_step": int(next_step)}, f, indent=2, ensure_ascii=False)
+        json.dump(
+            {
+                "next_epoch": int(next_epoch),
+                "next_step": int(next_step),
+                "global_optimizer_step": int(global_optimizer_step),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 def _write_early_stopping_state(output_dir: str, early_stopping: EarlyStoppingState):
@@ -590,18 +810,27 @@ def _print_debug_samples(logger, dataset, prefix: str, limit: int = 2):
         )
 
 
-def eval_pretrain(model, val_loader, epoch: int, epochs: int, device: torch.device, logger):
+def eval_pretrain(model, val_loader, epoch: int, epochs: int, device: torch.device, logger, accelerator=None):
     model.eval()
-    total_eval_loss = 0.0
-    total_eval_batches = 0
+    total_loss_sum = torch.tensor(0.0, device=device)
+    total_valid_tokens = torch.tensor(0.0, device=device)
     val_loader.dataset.reset_error_stats()
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc=f"Pretrain eval {epoch + 1}/{epochs}", leave=False):
+        iterator = tqdm(
+            val_loader,
+            desc=f"Pretrain eval {epoch + 1}/{epochs}",
+            leave=False,
+            disable=accelerator is not None and not accelerator.is_main_process,
+        )
+        for batch in iterator:
             loss = forward_pretrain_batch(model, batch, device=device)
-            total_eval_loss += float(loss.item())
-            total_eval_batches += 1
-    avg_eval_loss = total_eval_loss / total_eval_batches if total_eval_batches > 0 else float("nan")
-    _log_error_stats(logger, "VAL", val_loader.dataset.consume_error_stats())
+            valid_tokens = count_valid_target_tokens(batch).to(device)
+            total_loss_sum = total_loss_sum + (loss.detach() * valid_tokens)
+            total_valid_tokens = total_valid_tokens + valid_tokens
+    avg_eval_loss_tensor = reduce_token_weighted_loss(total_loss_sum, total_valid_tokens, accelerator=accelerator)
+    avg_eval_loss = float(avg_eval_loss_tensor.detach().cpu().item())
+    if accelerator is None or accelerator.is_main_process:
+        _log_error_stats(logger, "VAL", val_loader.dataset.consume_error_stats())
     model.train()
     if getattr(model, "qformer_enabled", False):
         model.qformer.eval()
@@ -627,6 +856,7 @@ def train_pretrain(model, tokenizer, train_loader, val_loader, config: Dict, out
     logger.info("Trainable parameter summary:")
     for row in trainable_parameter_summary(model):
         logger.info(row)
+    log_optimizer_param_group_health(model, optimizer, logger)
 
     return optimizer, lr_scheduler
 
@@ -658,59 +888,105 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
     accum_steps = int(config["training"]["gradient_accumulation_steps"])
     max_grad_norm = float(config["training"]["max_grad_norm"])
     metrics_path = os.path.join(output_dir, "metrics.json")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_accelerate = bool(config["training"].get("use_accelerate", False))
+    accelerator = Accelerator(gradient_accumulation_steps=accum_steps) if use_accelerate else None
+    is_main_process = accelerator is None or accelerator.is_main_process
+    device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     patience = int(config["training"].get("early_stopping_patience", 0))
     min_delta = float(config["training"].get("early_stopping_min_delta", 0.0))
+    burn_in_epochs = int(config["training"].get("early_stopping_burn_in_epochs", 0))
     restore_best_checkpoint = bool(config["training"].get("restore_best_checkpoint", True))
     best_dir = os.path.join(output_dir, "best")
     last_dir = os.path.join(output_dir, "last")
     early_stopping = EarlyStoppingState(patience=patience, min_delta=min_delta) if patience > 0 else None
     metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2, ensure_ascii=False)
+    if is_main_process:
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, ensure_ascii=False)
+        logger.info(
+            "Pretrain distributed runtime | accelerate=%s | world_size=%s | rank=%s | device=%s | accum_steps=%s",
+            use_accelerate,
+            accelerator.num_processes if accelerator is not None else 1,
+            accelerator.process_index if accelerator is not None else 0,
+            device,
+            accum_steps,
+        )
+        logger.info(
+            "Pretrain config runtime | mode=%s | batch_size=%s | global_batch=%s | grad_ckpt=%s | bf16=%s | quant=%s",
+            config.get("trajectory", {}).get("fusion_mode", "unknown"),
+            config["training"].get("batch_size", "unknown"),
+            int(config["training"].get("batch_size", 1)) * accum_steps * (accelerator.num_processes if accelerator is not None else 1),
+            config["training"].get("gradient_checkpointing", False),
+            config["training"].get("bf16", False),
+            config.get("model", {}).get("quantization", {}).get("enabled", False),
+        )
+        log_flash_attention_runtime(model, logger)
+        _write_run_metadata(output_dir, _build_run_metadata(config, global_optimizer_step=0))
 
     optimizer, lr_scheduler = train_pretrain(model, tokenizer, train_loader, val_loader, config, output_dir, logger)
+    if accelerator is not None:
+        model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+            model,
+            optimizer,
+            train_loader,
+            val_loader,
+            lr_scheduler,
+        )
+    unwrapped_model = accelerator.unwrap_model(model) if accelerator is not None else model
 
     if resume_dir and os.path.exists(resume_dir):
-        logger.info(f"Resuming pretrain from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
-        validate_pretrain_resume_checkpoint(model, resume_dir, logger)
-        load_qformer_bridge(model, resume_dir, strict=True)
-        align_qformer_bridge_runtime(model)
-        load_trajectory_branch(model, resume_dir, strict=True)
-        align_qformer_bridge_runtime(model)
+        if is_main_process:
+            logger.info(f"Resuming pretrain from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
+        validate_pretrain_resume_checkpoint(unwrapped_model, resume_dir, logger)
+        load_qformer_bridge(unwrapped_model, resume_dir, strict=True)
+        align_qformer_bridge_runtime(unwrapped_model)
+        load_trajectory_branch(unwrapped_model, resume_dir, strict=True)
+        align_qformer_bridge_runtime(unwrapped_model)
 
         opt_path = os.path.join(resume_dir, "optimizer.pt")
         sch_path = os.path.join(resume_dir, "scheduler.pt")
         if os.path.exists(opt_path) and os.path.exists(sch_path):
             optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
             lr_scheduler.load_state_dict(torch.load(sch_path, map_location="cpu"))
-        else:
+        elif is_main_process:
             logger.warning("No optimizer/scheduler states found in pretrain checkpoint. Starting with fresh optimizer states.")
 
         if early_stopping is not None:
             restored_early_stopping = _load_early_stopping_state(resume_dir)
             if restored_early_stopping is None:
-                logger.warning(
-                    "No %s found in pretrain checkpoint. Early stopping state will restart from scratch.",
-                    EARLY_STOPPING_STATE_FILENAME,
-                )
+                if is_main_process:
+                    logger.warning(
+                        "No %s found in pretrain checkpoint. Early stopping state will restart from scratch.",
+                        EARLY_STOPPING_STATE_FILENAME,
+                    )
             else:
                 early_stopping.best_val_loss = restored_early_stopping.best_val_loss
                 early_stopping.best_epoch = restored_early_stopping.best_epoch
                 early_stopping.num_bad_epochs = restored_early_stopping.num_bad_epochs
-                logger.info(
-                    "Restored early stopping state | best_epoch=%s | best_val_loss=%s | bad_epochs=%s/%s",
-                    early_stopping.best_epoch,
-                    f"{early_stopping.best_val_loss:.4f}" if early_stopping.best_val_loss is not None else "None",
-                    early_stopping.num_bad_epochs,
-                    early_stopping.patience,
-                )
+                if is_main_process:
+                    logger.info(
+                        "Restored early stopping state | best_epoch=%s | best_val_loss=%s | bad_epochs=%s/%s",
+                        early_stopping.best_epoch,
+                        f"{early_stopping.best_val_loss:.4f}" if early_stopping.best_val_loss is not None else "None",
+                        early_stopping.num_bad_epochs,
+                        early_stopping.patience,
+                    )
+
+    global_optimizer_step = 0
+    if resume_dir and os.path.exists(resume_dir):
+        restored_training_state = read_training_state(resume_dir)
+        if restored_training_state is not None:
+            global_optimizer_step = int(restored_training_state.get("global_optimizer_step", 0))
+            if is_main_process:
+                logger.info("Restored global_optimizer_step=%s", global_optimizer_step)
+    profile_steps = int(config["training"].get("profile_steps", 0))
+    gradient_debug_steps = int(config["training"].get("gradient_debug_steps", 1))
 
     for epoch in range(start_epoch, epochs):
         model.train()
-        if getattr(model, "qformer_enabled", False):
-            model.qformer.eval()
-            model.mlp1.eval()
+        if getattr(unwrapped_model, "qformer_enabled", False):
+            unwrapped_model.qformer.eval()
+            unwrapped_model.mlp1.eval()
         optimizer.zero_grad()
         train_loader.dataset.reset_error_stats()
         accumulated_loss_for_log = 0.0
@@ -718,88 +994,172 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
 
         batch_iterator = iter(train_loader)
         if epoch == start_epoch and start_step > 0:
-            logger.info(f"Skipping {start_step} batches to resume pretrain state...")
-            for _ in tqdm(range(start_step), desc="Skipping to pretrain resume point", leave=False):
+            if is_main_process:
+                logger.info(f"Skipping {start_step} batches to resume pretrain state...")
+            for _ in tqdm(
+                range(start_step),
+                desc="Skipping to pretrain resume point",
+                leave=False,
+                disable=not is_main_process,
+            ):
                 next(batch_iterator)
             initial_step = start_step
         else:
             initial_step = 0
 
-        progress_bar = tqdm(batch_iterator, desc=f"Pretrain epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=initial_step)
+        progress_bar = tqdm(
+            batch_iterator,
+            desc=f"Pretrain epoch {epoch + 1}/{epochs}",
+            total=len(train_loader),
+            initial=initial_step,
+            disable=not is_main_process,
+        )
         for step, batch in enumerate(progress_bar, start=initial_step + 1):
-            loss = forward_pretrain_batch(model, batch, device=device)
-            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
-            (loss / accum_steps).backward()
-            accumulated_loss_for_log += float(loss.item())
+            step_start = time.perf_counter()
+            if accelerator is not None:
+                with accelerator.accumulate(model):
+                    loss = forward_pretrain_batch(model, batch, device=device)
+                    accelerator.backward(loss)
+                    accumulated_loss_for_log += float(loss.detach().cpu().item())
+                    if accelerator.sync_gradients:
+                        if torch.cuda.is_available() and global_optimizer_step < profile_steps:
+                            torch.cuda.synchronize()
+                        accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+                        if is_main_process and global_optimizer_step < gradient_debug_steps:
+                            log_gradient_health(unwrapped_model, logger)
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad()
+                        global_optimizer_step += 1
+                        global_steps_this_epoch += 1
+                        avg_loss = accumulated_loss_for_log / accum_steps
+                        if is_main_process:
+                            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+                            metrics["train_loss"].append(
+                                {"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)}
+                            )
+                            if global_optimizer_step <= profile_steps:
+                                if torch.cuda.is_available():
+                                    torch.cuda.synchronize()
+                                logger.info(
+                                    "Profile step | global_step=%s | elapsed_sec=%.4f",
+                                    global_optimizer_step,
+                                    time.perf_counter() - step_start,
+                                )
+                        accumulated_loss_for_log = 0.0
+            else:
+                loss = forward_pretrain_batch(model, batch, device=device)
+                progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+                (loss / accum_steps).backward()
+                accumulated_loss_for_log += float(loss.item())
+                if step % accum_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    if global_optimizer_step < gradient_debug_steps:
+                        log_gradient_health(model, logger)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    global_optimizer_step += 1
+                    global_steps_this_epoch += 1
+                    avg_loss = accumulated_loss_for_log / accum_steps
+                    metrics["train_loss"].append({"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)})
+                    accumulated_loss_for_log = 0.0
 
-            if step % accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                global_steps_this_epoch += 1
-                avg_loss = accumulated_loss_for_log / accum_steps
-                metrics["train_loss"].append({"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)})
-                accumulated_loss_for_log = 0.0
-
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
         train_stats = train_loader.dataset.consume_error_stats()
-        _log_error_stats(logger, "TRAIN", train_stats)
+        if is_main_process:
+            _log_error_stats(logger, "TRAIN", train_stats)
 
-        val_loss = eval_pretrain(model, val_loader, epoch, epochs, device, logger)
-        metrics["val_loss"].append({"epoch": epoch + 1, "loss": round(val_loss, 6)})
+        val_loss = eval_pretrain(model, val_loader, epoch, epochs, device, logger, accelerator=accelerator)
+        if is_main_process:
+            metrics["val_loss"].append({"epoch": epoch + 1, "loss": round(val_loss, 6)})
 
-        epoch_losses = [item["loss"] for item in metrics["train_loss"] if item["epoch"] == epoch + 1]
-        avg_epoch_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("nan")
-        metrics["epoch_summary"].append(
-            {"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6), "val_loss": round(val_loss, 6)}
-        )
-        logger.info(
-            "Pretrain epoch %s summary | avg_train_loss=%.4f | val_loss=%.4f",
-            epoch + 1,
-            avg_epoch_loss,
-            val_loss,
-        )
+            epoch_losses = [item["loss"] for item in metrics["train_loss"] if item["epoch"] == epoch + 1]
+            avg_epoch_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("nan")
+            metrics["epoch_summary"].append(
+                {"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6), "val_loss": round(val_loss, 6)}
+            )
+            logger.info(
+                "Pretrain epoch %s summary | avg_train_loss=%.4f | val_loss=%.4f",
+                epoch + 1,
+                avg_epoch_loss,
+                val_loss,
+            )
         improved = False
         should_stop = False
         if early_stopping is not None:
-            improved, should_stop = early_stopping.update(epoch=epoch + 1, val_loss=val_loss)
-            logger.info(
-                "Early stopping status | improved=%s | best_epoch=%s | best_val_loss=%.4f | bad_epochs=%s/%s",
-                improved,
-                early_stopping.best_epoch,
-                early_stopping.best_val_loss if early_stopping.best_val_loss is not None else float("nan"),
-                early_stopping.num_bad_epochs,
-                early_stopping.patience,
+            if epoch + 1 <= burn_in_epochs:
+                improved = early_stopping.best_val_loss is None
+                if improved:
+                    early_stopping.best_val_loss = val_loss
+                    early_stopping.best_epoch = epoch + 1
+                    early_stopping.num_bad_epochs = 0
+            else:
+                improved, should_stop = early_stopping.update(epoch=epoch + 1, val_loss=val_loss)
+            if is_main_process:
+                logger.info(
+                    "Early stopping status | improved=%s | best_epoch=%s | best_val_loss=%.4f | bad_epochs=%s/%s | burn_in_epochs=%s",
+                    improved,
+                    early_stopping.best_epoch,
+                    early_stopping.best_val_loss if early_stopping.best_val_loss is not None else float("nan"),
+                    early_stopping.num_bad_epochs,
+                    early_stopping.patience,
+                    burn_in_epochs,
+                )
+
+        if is_main_process:
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2, ensure_ascii=False)
+
+            save_model = accelerator.unwrap_model(model) if accelerator is not None else model
+            if os.path.exists(last_dir):
+                shutil.rmtree(last_dir)
+            _save_pretrain_checkpoint(
+                save_model,
+                tokenizer,
+                last_dir,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                run_metadata=_build_run_metadata(config, global_optimizer_step=global_optimizer_step),
             )
-
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2, ensure_ascii=False)
-
-        if os.path.exists(last_dir):
-            shutil.rmtree(last_dir)
-        _save_pretrain_checkpoint(model, tokenizer, last_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
-        _write_training_state(last_dir, next_epoch=epoch + 1, next_step=0)
-        if early_stopping is not None:
-            _write_early_stopping_state(last_dir, early_stopping)
-        logger.info("Saved latest pretrain checkpoint to %s", last_dir)
-        if improved:
-            if os.path.exists(best_dir):
-                shutil.rmtree(best_dir)
-            _save_pretrain_checkpoint(model, tokenizer, best_dir, optimizer=optimizer, lr_scheduler=lr_scheduler)
-            _write_training_state(best_dir, next_epoch=epoch + 1, next_step=0)
+            _write_training_state(last_dir, next_epoch=epoch + 1, next_step=0, global_optimizer_step=global_optimizer_step)
             if early_stopping is not None:
-                _write_early_stopping_state(best_dir, early_stopping)
-            logger.info("Updated best pretrain checkpoint at %s", best_dir)
+                _write_early_stopping_state(last_dir, early_stopping)
+            logger.info("Saved latest pretrain checkpoint to %s", last_dir)
+            if improved:
+                if os.path.exists(best_dir):
+                    shutil.rmtree(best_dir)
+                _save_pretrain_checkpoint(
+                    save_model,
+                    tokenizer,
+                    best_dir,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    run_metadata=_build_run_metadata(config, global_optimizer_step=global_optimizer_step),
+                )
+                _write_training_state(best_dir, next_epoch=epoch + 1, next_step=0, global_optimizer_step=global_optimizer_step)
+                if early_stopping is not None:
+                    _write_early_stopping_state(best_dir, early_stopping)
+                logger.info("Updated best pretrain checkpoint at %s", best_dir)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
         if should_stop:
-            logger.info("Early stopping triggered at epoch %s", epoch + 1)
+            if is_main_process:
+                logger.info("Early stopping triggered at epoch %s", epoch + 1)
             break
 
     if restore_best_checkpoint and os.path.exists(best_dir):
-        logger.info("Restoring best checkpoint from %s", best_dir)
-        load_qformer_bridge(model, best_dir, strict=True)
-        align_qformer_bridge_runtime(model)
-        load_trajectory_branch(model, best_dir, strict=True)
-        align_qformer_bridge_runtime(model)
+        if is_main_process:
+            logger.info("Restoring best checkpoint from %s", best_dir)
+        final_model = accelerator.unwrap_model(model) if accelerator is not None else model
+        load_qformer_bridge(final_model, best_dir, strict=True)
+        align_qformer_bridge_runtime(final_model)
+        load_trajectory_branch(final_model, best_dir, strict=True)
+        align_qformer_bridge_runtime(final_model)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    return metrics
 
 
 def main():
@@ -807,23 +1167,30 @@ def main():
     args = parse_args()
     config = load_config(args.config)
     output_dir = build_output_dir(config)
-    init_logger(output_dir)
-    logger = get_logger()
+    rank = int(os.environ.get("RANK", "0"))
+    if rank == 0:
+        init_logger(output_dir)
+        logger = get_logger()
+    else:
+        logger = SilentLogger()
     resume_dir, start_epoch, start_step = resolve_resume_config(args, logger)
 
     model, tokenizer = build_model_and_tokenizer(config, logger)
-    train_dataset, val_dataset, train_loader, val_loader = build_dataloaders(config, model, tokenizer)
-    _print_debug_samples(logger, train_dataset, "train")
-    _print_debug_samples(logger, val_dataset, "val")
+    train_dataset, val_dataset, test_dataset, split_stats, train_loader, val_loader = build_dataloaders(config, model, tokenizer)
+    if rank == 0:
+        logger.info("Pretrain split stats: %s", json.dumps(split_stats, ensure_ascii=False))
+        _print_debug_samples(logger, train_dataset, "train")
+        _print_debug_samples(logger, val_dataset, "val")
 
     logger.info(
-        "Pretrain runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | num_image_token=%s | train_rows=%s | val_rows=%s",
+        "Pretrain runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | num_image_token=%s | train_rows=%s | val_rows=%s | test_rows=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "trajectory_enabled", False),
         getattr(model, "trajectory_fusion_mode", "disabled"),
         getattr(model, "num_image_token", "unknown"),
         len(train_dataset),
         len(val_dataset),
+        len(test_dataset),
     )
 
     run_pretrain_training(

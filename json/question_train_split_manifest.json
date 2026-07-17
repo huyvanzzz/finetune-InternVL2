@@ -1,0 +1,56 @@
+{
+  "source_file": "json\\question_train.jsonl",
+  "seed": 42,
+  "group_key": "frame_path",
+  "ratios": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "files": {
+    "train": "json\\question_train_split_train.jsonl",
+    "val": "json\\question_train_split_val.jsonl",
+    "test": "json\\question_train_split_test.jsonl"
+  },
+  "stats": {
+    "train": {
+      "row_count": 44039,
+      "frame_count": 8836,
+      "question_id_counts": {
+        "q1_global_retrieval": 8836,
+        "q2_global_retrieval": 8836,
+        "q3_object_verification": 141,
+        "q3_pairwise_comparison": 8695,
+        "q4_bbox_verification": 141,
+        "q4_object_verification": 8695,
+        "q5_bbox_verification": 8695
+      }
+    },
+    "val": {
+      "row_count": 5502,
+      "frame_count": 1104,
+      "question_id_counts": {
+        "q1_global_retrieval": 1104,
+        "q2_global_retrieval": 1104,
+        "q3_object_verification": 18,
+        "q3_pairwise_comparison": 1086,
+        "q4_bbox_verification": 18,
+        "q4_object_verification": 1086,
+        "q5_bbox_verification": 1086
+      }
+    },
+    "test": {
+      "row_count": 5503,
+      "frame_count": 1104,
+      "question_id_counts": {
+        "q1_global_retrieval": 1104,
+        "q2_global_retrieval": 1104,
+        "q3_object_verification": 17,
+        "q3_pairwise_comparison": 1087,
+        "q4_bbox_verification": 17,
+        "q4_object_verification": 1087,
+        "q5_bbox_verification": 1087
+      }
+    }
+  }
+}

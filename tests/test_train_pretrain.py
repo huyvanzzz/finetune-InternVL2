@@ -8,10 +8,15 @@ from train_pretrain import (
     EarlyStoppingState,
     PretrainCollaterFn,
     _build_optimizer,
+    _build_run_metadata,
     _write_training_state,
+    build_dataloader_kwargs,
     forward_pretrain_batch,
     infer_resume_position,
+    inspect_optimizer_param_groups,
+    reduce_token_weighted_loss,
     resolve_warmup_steps,
+    verify_flash_attention_runtime,
 )
 
 
@@ -171,6 +176,107 @@ def test_build_optimizer_separates_trajectory_and_bridge_groups():
     assert lrs == [1e-05, 3e-05, 1e-04]
 
 
+def test_inspect_optimizer_param_groups_detects_missing_trainable_params():
+    model = _DummyModel()
+    config = {
+        "training": {
+            "learning_rate": 1e-5,
+            "trajectory_learning_rate": 1e-4,
+            "bridge_learning_rate": 3e-5,
+            "weight_decay": 0.01,
+        }
+    }
+
+    class _FakeLogger:
+        def info(self, *args, **kwargs):
+            return None
+
+    optimizer = _build_optimizer(model, config, _FakeLogger())
+    removed = optimizer.param_groups[0]["params"].pop()
+
+    report = inspect_optimizer_param_groups(model, optimizer)
+
+    assert removed.requires_grad
+    assert report["missing_param_names"]
+    assert report["duplicate_param_names"] == []
+
+
+def test_build_dataloader_kwargs_enables_server_worker_options():
+    cfg = {
+        "hardware": {
+            "num_workers": 4,
+            "pin_memory": True,
+            "persistent_workers": True,
+            "prefetch_factor": 3,
+        }
+    }
+
+    kwargs = build_dataloader_kwargs(cfg)
+
+    assert kwargs == {
+        "num_workers": 4,
+        "pin_memory": True,
+        "persistent_workers": True,
+        "prefetch_factor": 3,
+    }
+
+
+def test_build_dataloader_kwargs_omits_worker_only_options_when_workers_zero():
+    cfg = {
+        "hardware": {
+            "num_workers": 0,
+            "pin_memory": False,
+            "persistent_workers": True,
+            "prefetch_factor": 3,
+        }
+    }
+
+    kwargs = build_dataloader_kwargs(cfg)
+
+    assert kwargs == {"num_workers": 0, "pin_memory": False}
+
+
+def test_reduce_token_weighted_loss_uses_token_counts():
+    loss_sum = torch.tensor(12.0)
+    token_count = torch.tensor(6.0)
+
+    assert reduce_token_weighted_loss(loss_sum, token_count, accelerator=None).item() == 2.0
+
+
+def test_build_run_metadata_contains_reproducibility_fields(monkeypatch):
+    monkeypatch.setattr(train_pretrain, "_git_commit", lambda: "abc123")
+    monkeypatch.setattr(train_pretrain, "_package_versions", lambda: {"torch": "x", "transformers": "y"})
+
+    metadata = _build_run_metadata(
+        config={"training": {"batch_size": 4}},
+        global_optimizer_step=9,
+    )
+
+    assert metadata["global_optimizer_step"] == 9
+    assert metadata["git_commit"] == "abc123"
+    assert metadata["package_versions"] == {"torch": "x", "transformers": "y"}
+    assert metadata["config_snapshot"]["training"]["batch_size"] == 4
+
+
+def test_verify_flash_attention_runtime_reports_flash_and_fallback_modules():
+    class _Attn(torch.nn.Module):
+        def __init__(self, use_flash):
+            super().__init__()
+            self.use_flash_attn = use_flash
+            self.config = SimpleNamespace(use_flash_attn=True)
+
+    model = torch.nn.Module()
+    model.flash = _Attn(True)
+    model.fallback = _Attn(False)
+
+    report = verify_flash_attention_runtime(model)
+
+    assert report["supported_count"] == 2
+    assert report["flash_enabled_count"] == 1
+    assert any(item["status"] == "flash" for item in report["modules"])
+    assert any(item["status"] == "fallback" for item in report["modules"])
+
+
 def test_early_stopping_state_tracks_best_and_stops_after_patience():
     state = EarlyStoppingState(patience=2, min_delta=0.005)
 
@@ -317,7 +423,7 @@ def test_load_early_stopping_state_returns_none_when_missing(tmp_path):
 
 
 def test_write_training_state_persists_epoch_and_step(tmp_path):
-    _write_training_state(str(tmp_path), next_epoch=5, next_step=12)
+    _write_training_state(str(tmp_path), next_epoch=5, next_step=12, global_optimizer_step=34)
     payload = json.loads((tmp_path / "training_state.json").read_text(encoding="utf-8"))
 
-    assert payload == {"next_epoch": 5, "next_step": 12}
+    assert payload == {"next_epoch": 5, "next_step": 12, "global_optimizer_step": 34}

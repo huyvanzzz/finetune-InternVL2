@@ -10,6 +10,7 @@ from pretrain_dataset import (
     build_pretrain_datasets,
     load_question_train_rows,
     split_question_rows_grouped,
+    split_question_rows_grouped_three_way,
 )
 
 
@@ -79,6 +80,43 @@ def test_split_question_rows_grouped_keeps_same_frame_path_together():
     val_paths = {row["frame_path"] for row in val_rows}
     assert train_paths.isdisjoint(val_paths)
     assert train_paths | val_paths == {"frame_a", "frame_b", "frame_c"}
+
+
+def test_split_question_rows_grouped_three_way_uses_frame_path_groups_and_reports_stats():
+    rows = []
+    for idx in range(10):
+        frame_path = f"frame_{idx:02d}"
+        for q_idx in range(2):
+            rows.append(
+                {
+                    "frame_path": frame_path,
+                    "frame_id": 8,
+                    "question_id": f"q{q_idx}",
+                    "question": "q",
+                    "gt": "a",
+                }
+            )
+
+    split = split_question_rows_grouped_three_way(
+        rows,
+        train_ratio=0.8,
+        val_ratio=0.1,
+        test_ratio=0.1,
+        seed=42,
+    )
+
+    train_paths = {row["frame_path"] for row in split.train_rows}
+    val_paths = {row["frame_path"] for row in split.val_rows}
+    test_paths = {row["frame_path"] for row in split.test_rows}
+    assert len(train_paths) == 8
+    assert len(val_paths) == 1
+    assert len(test_paths) == 1
+    assert train_paths.isdisjoint(val_paths)
+    assert train_paths.isdisjoint(test_paths)
+    assert val_paths.isdisjoint(test_paths)
+    assert split.stats["train"]["frame_count"] == 8
+    assert split.stats["val"]["row_count"] == 2
+    assert split.stats["test"]["question_id_counts"] == {"q0": 1, "q1": 1}
 
 
 def test_pretrain_dataset_builds_expected_sample(tmp_path, monkeypatch):
@@ -200,11 +238,11 @@ def test_build_pretrain_datasets_returns_disjoint_grouped_splits(tmp_path):
     _write_jsonl_with_bom(question_path, rows)
     _write_frame_index(frame_index_path, ["frame_a", "frame_b", "frame_c"])
 
-    train_dataset, val_dataset = build_pretrain_datasets(
+    train_dataset, val_dataset, test_dataset, split_stats = build_pretrain_datasets(
         question_train_file=question_path,
         frame_index_path=frame_index_path,
         trajectory_source=_FakeTrajectorySource(),
-        val_split_ratio=0.34,
+        val_split_ratio=0.1,
         val_split_seed=42,
         movement_enabled=True,
     )
@@ -212,3 +250,54 @@ def test_build_pretrain_datasets_returns_disjoint_grouped_splits(tmp_path):
     train_paths = {row["frame_path"] for row in train_dataset.rows}
     val_paths = {row["frame_path"] for row in val_dataset.rows}
     assert train_paths.isdisjoint(val_paths)
+    assert split_stats["train"]["row_count"] == len(train_dataset.rows)
+    assert test_dataset.split_name == "test"
+
+
+def test_build_pretrain_datasets_reads_fixed_split_files_and_rejects_frame_leak(tmp_path):
+    train_rows = [
+        {"frame_path": "frame_train", "frame_id": 8, "question_id": "q1", "question": "q", "gt": "a"},
+    ]
+    val_rows = [
+        {"frame_path": "frame_val", "frame_id": 8, "question_id": "q1", "question": "q", "gt": "a"},
+    ]
+    test_rows = [
+        {"frame_path": "frame_test", "frame_id": 8, "question_id": "q1", "question": "q", "gt": "a"},
+    ]
+    train_path = tmp_path / "train.jsonl"
+    val_path = tmp_path / "val.jsonl"
+    test_path = tmp_path / "test.jsonl"
+    frame_index_path = tmp_path / "frame_index.pkl"
+    _write_jsonl_with_bom(train_path, train_rows)
+    _write_jsonl_with_bom(val_path, val_rows)
+    _write_jsonl_with_bom(test_path, test_rows)
+    _write_frame_index(frame_index_path, ["frame_train", "frame_val", "frame_test"])
+
+    train_dataset, val_dataset, test_dataset, stats = build_pretrain_datasets(
+        question_train_file=train_path,
+        question_val_file=val_path,
+        question_test_file=test_path,
+        frame_index_path=frame_index_path,
+        trajectory_source=_FakeTrajectorySource(),
+        val_split_ratio=0.1,
+        val_split_seed=42,
+        movement_enabled=True,
+    )
+
+    assert train_dataset.rows == train_rows
+    assert val_dataset.rows == val_rows
+    assert test_dataset.rows == test_rows
+    assert stats["test"]["frame_count"] == 1
+
+    _write_jsonl_with_bom(test_path, [{"frame_path": "frame_val", "frame_id": 8, "question_id": "q1", "question": "q", "gt": "a"}])
+    with pytest.raises(ValueError, match="frame_path leakage"):
+        build_pretrain_datasets(
+            question_train_file=train_path,
+            question_val_file=val_path,
+            question_test_file=test_path,
+            frame_index_path=frame_index_path,
+            trajectory_source=_FakeTrajectorySource(),
+            val_split_ratio=0.1,
+            val_split_seed=42,
+            movement_enabled=True,
+        )
