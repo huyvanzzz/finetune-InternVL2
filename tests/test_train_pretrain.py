@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import torch
@@ -7,6 +8,7 @@ from train_pretrain import (
     EarlyStoppingState,
     PretrainCollaterFn,
     _build_optimizer,
+    _write_training_state,
     forward_pretrain_batch,
     infer_resume_position,
     resolve_warmup_steps,
@@ -288,3 +290,34 @@ def test_infer_resume_position_reads_last_training_state(tmp_path):
     )
 
     assert infer_resume_position(str(last_dir)) == (3, 0)
+
+
+def test_early_stopping_state_round_trip_json(tmp_path):
+    state = EarlyStoppingState(
+        patience=8,
+        min_delta=0.005,
+        best_val_loss=0.4321,
+        best_epoch=7,
+        num_bad_epochs=3,
+    )
+
+    train_pretrain._write_early_stopping_state(str(tmp_path), state)
+    restored = train_pretrain._load_early_stopping_state(str(tmp_path))
+
+    assert restored is not None
+    assert restored.patience == 8
+    assert restored.min_delta == 0.005
+    assert restored.best_val_loss == 0.4321
+    assert restored.best_epoch == 7
+    assert restored.num_bad_epochs == 3
+
+
+def test_load_early_stopping_state_returns_none_when_missing(tmp_path):
+    assert train_pretrain._load_early_stopping_state(str(tmp_path)) is None
+
+
+def test_write_training_state_persists_epoch_and_step(tmp_path):
+    _write_training_state(str(tmp_path), next_epoch=5, next_step=12)
+    payload = json.loads((tmp_path / "training_state.json").read_text(encoding="utf-8"))
+
+    assert payload == {"next_epoch": 5, "next_step": 12}

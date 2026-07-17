@@ -85,6 +85,15 @@ def test_train_pretrain_supports_resume_checkpoint_surface():
     assert 'Resuming pretrain' in content or 'resume pretrain' in content.lower()
     assert '"last"' in content or "'last'" in content
     assert 'training_state.json' in content
+    assert 'early_stopping_state.json' in content
+    assert 'best_val_loss' in content
+
+
+def test_hf_resume_allow_patterns_include_state_files():
+    content = Path("train_pretrain.py").read_text(encoding="utf-8")
+
+    assert 'training_state.json' in content
+    assert 'early_stopping_state.json' in content
 
 
 def test_run_pretrain_notebook_exists_and_targets_pretrain_branch():

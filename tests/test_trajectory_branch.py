@@ -293,3 +293,20 @@ def test_attach_trajectory_branch_updates_num_image_token_by_mode(tmp_path):
         llm_hidden_size=896,
     )
     assert dual_model.num_image_token == 38
+
+
+def test_pretrain_configs_use_upscaled_trajectory_architecture():
+    expected_snippets = (
+        "d_traj: 384",
+        "num_layers: 4",
+        "ffn_dim: 768",
+    )
+
+    for config_name in (
+        "internvl_pretrain_config_traj_cls.yaml",
+        "internvl_pretrain_config_traj_concat.yaml",
+        "internvl_pretrain_config_traj_dual.yaml",
+    ):
+        content = Path(config_name).read_text(encoding="utf-8")
+        for snippet in expected_snippets:
+            assert snippet in content
