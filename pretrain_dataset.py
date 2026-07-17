@@ -19,6 +19,14 @@ REQUIRED_QUESTION_FIELDS = ("frame_path", "frame_id", "question", "gt")
 DEFAULT_FRAME_INDEX_PATH = "./wad_dataset/frame_index.pkl"
 
 
+@dataclass
+class PretrainSplit:
+    train_rows: List[Dict]
+    val_rows: List[Dict]
+    test_rows: List[Dict]
+    stats: Dict
+
+
 class PretrainSampleError(RuntimeError):
     def __init__(self, reason: str, message: str):
         super().__init__(message)
@@ -93,6 +101,76 @@ def split_question_rows_grouped(rows: Sequence[Dict], val_ratio: float, seed: in
     train_rows = [row for row in rows if str(row["frame_path"]) in train_set]
     val_rows = [row for row in rows if str(row["frame_path"]) in val_set]
     return train_rows, val_rows
+
+
+def _question_id_counts(rows: Sequence[Dict]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("question_id", ""))
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _split_stats(rows: Sequence[Dict]) -> Dict:
+    return {
+        "row_count": len(rows),
+        "frame_count": len({str(row["frame_path"]) for row in rows}),
+        "question_id_counts": _question_id_counts(rows),
+    }
+
+
+def split_question_rows_grouped_three_way(
+    rows: Sequence[Dict],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> PretrainSplit:
+    if not rows:
+        raise ValueError("Cannot split an empty question row list.")
+    ratio_sum = train_ratio + val_ratio + test_ratio
+    if abs(ratio_sum - 1.0) > 1e-6:
+        raise ValueError(f"train/val/test ratios must sum to 1.0, got {ratio_sum}")
+    if min(train_ratio, val_ratio, test_ratio) < 0.0:
+        raise ValueError("train/val/test ratios must be non-negative.")
+
+    grouped: Dict[str, List[Dict]] = {}
+    for row in rows:
+        frame_path = str(row["frame_path"])
+        grouped.setdefault(frame_path, []).append(row)
+
+    frame_paths = sorted(grouped.keys())
+    rng = random.Random(seed)
+    rng.shuffle(frame_paths)
+    total_frames = len(frame_paths)
+    test_count = int(round(total_frames * test_ratio))
+    val_count = int(round(total_frames * val_ratio))
+    if total_frames >= 3:
+        if test_ratio > 0.0:
+            test_count = max(1, test_count)
+        if val_ratio > 0.0:
+            val_count = max(1, val_count)
+    if test_count + val_count >= total_frames:
+        overflow = test_count + val_count - total_frames + 1
+        val_count = max(0, val_count - overflow)
+
+    test_paths = set(frame_paths[:test_count])
+    val_paths = set(frame_paths[test_count : test_count + val_count])
+    train_paths = set(frame_paths[test_count + val_count :])
+    train_rows = [row for row in rows if str(row["frame_path"]) in train_paths]
+    val_rows = [row for row in rows if str(row["frame_path"]) in val_paths]
+    test_rows = [row for row in rows if str(row["frame_path"]) in test_paths]
+
+    return PretrainSplit(
+        train_rows=train_rows,
+        val_rows=val_rows,
+        test_rows=test_rows,
+        stats={
+            "train": _split_stats(train_rows),
+            "val": _split_stats(val_rows),
+            "test": _split_stats(test_rows),
+        },
+    )
 
 
 def load_frame_index(frame_index_path: os.PathLike | str = DEFAULT_FRAME_INDEX_PATH) -> Dict:
@@ -274,21 +352,68 @@ def build_pretrain_datasets(
     val_split_ratio: float,
     val_split_seed: int,
     movement_enabled: bool,
+    train_split_ratio: float = 0.8,
+    test_split_ratio: float = 0.1,
+    question_val_file: os.PathLike | str | None = None,
+    question_test_file: os.PathLike | str | None = None,
 ):
-    rows = load_question_train_rows(question_train_file)
-    train_rows, val_rows = split_question_rows_grouped(rows, val_ratio=val_split_ratio, seed=val_split_seed)
+    train_rows = load_question_train_rows(question_train_file)
+    if question_val_file is not None and question_test_file is not None:
+        val_rows = load_question_train_rows(question_val_file)
+        test_rows = load_question_train_rows(question_test_file)
+        split = PretrainSplit(
+            train_rows=train_rows,
+            val_rows=val_rows,
+            test_rows=test_rows,
+            stats={
+                "train": _split_stats(train_rows),
+                "val": _split_stats(val_rows),
+                "test": _split_stats(test_rows),
+            },
+        )
+        verify_pretrain_split_no_frame_leak(split)
+    else:
+        split = split_question_rows_grouped_three_way(
+            train_rows,
+            train_ratio=train_split_ratio,
+            val_ratio=val_split_ratio,
+            test_ratio=test_split_ratio,
+            seed=val_split_seed,
+        )
     train_dataset = PretrainQADataset(
-        rows=train_rows,
+        rows=split.train_rows,
         frame_index_path=frame_index_path,
         trajectory_source=trajectory_source,
         split_name="train",
         movement_enabled=movement_enabled,
     )
     val_dataset = PretrainQADataset(
-        rows=val_rows,
+        rows=split.val_rows,
         frame_index_path=frame_index_path,
         trajectory_source=trajectory_source,
         split_name="val",
         movement_enabled=movement_enabled,
     )
-    return train_dataset, val_dataset
+    test_dataset = PretrainQADataset(
+        rows=split.test_rows,
+        frame_index_path=frame_index_path,
+        trajectory_source=trajectory_source,
+        split_name="test",
+        movement_enabled=movement_enabled,
+    )
+    return train_dataset, val_dataset, test_dataset, split.stats
+
+
+def verify_pretrain_split_no_frame_leak(split: PretrainSplit):
+    frame_sets = {
+        "train": {str(row["frame_path"]) for row in split.train_rows},
+        "val": {str(row["frame_path"]) for row in split.val_rows},
+        "test": {str(row["frame_path"]) for row in split.test_rows},
+    }
+    for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
+        overlap = frame_sets[left] & frame_sets[right]
+        if overlap:
+            raise ValueError(f"frame_path leakage between {left} and {right}: {sorted(overlap)[:5]}")
+    for name, rows in (("train", split.train_rows), ("val", split.val_rows), ("test", split.test_rows)):
+        if not rows:
+            raise ValueError(f"Pretrain split {name} is empty.")
