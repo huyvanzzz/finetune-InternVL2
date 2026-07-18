@@ -199,9 +199,11 @@ def count_named_parameters(model, prefixes):
 
 
 def compute_sequence_loss(logits, labels, loss_mode: str, label_smoothing: float):
-    vocab_size = logits.shape[-1]
-    flat_logits = logits.view(-1, vocab_size)
-    flat_labels = labels.view(-1)
+    shifted_logits = logits[..., :-1, :].contiguous()
+    shifted_labels = labels[..., 1:].contiguous().to(shifted_logits.device)
+    vocab_size = shifted_logits.shape[-1]
+    flat_logits = shifted_logits.view(-1, vocab_size)
+    flat_labels = shifted_labels.view(-1)
     if loss_mode == "label_smoothing":
         return F.cross_entropy(
             flat_logits,
