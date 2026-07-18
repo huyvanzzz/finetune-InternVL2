@@ -12,6 +12,7 @@ import torch
 import yaml
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -150,6 +151,73 @@ def resolve_resume_config(args, config):
     return checkpoint, int(start_epoch or 0), int(start_step or 0)
 
 
+def is_lora_parameter_name(name: str) -> bool:
+    return "lora_" in name.lower()
+
+
+def build_optimizer_param_groups(model, lora_lr: float, bridge_lr: float, trajectory_lr: float):
+    bridge_param_names = {"qformer_input_proj", "qformer_to_mlp1_proj"}
+    trajectory_param_names = {
+        "trajectory_backbone",
+        "trajectory_cls_head",
+        "trajectory_token_projector",
+    }
+
+    grouped = {
+        "trajectory": {"name": "trajectory", "params": [], "lr": trajectory_lr},
+        "bridge": {"name": "bridge", "params": [], "lr": bridge_lr},
+        "lora": {"name": "lora", "params": [], "lr": lora_lr},
+    }
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(group_name in name for group_name in trajectory_param_names):
+            grouped["trajectory"]["params"].append(param)
+        elif any(group_name in name for group_name in bridge_param_names):
+            grouped["bridge"]["params"].append(param)
+        elif is_lora_parameter_name(name):
+            grouped["lora"]["params"].append(param)
+
+    return [grouped["trajectory"], grouped["bridge"], grouped["lora"]]
+
+
+def log_optimizer_group_summary(param_groups):
+    parts = []
+    for group in param_groups:
+        count = sum(param.numel() for param in group["params"])
+        parts.append(f"{group['name']}={count:,} params @ lr={group['lr']}")
+    logger.info("Param groups | %s", " | ".join(parts))
+
+
+def count_named_parameters(model, prefixes):
+    return sum(
+        param.numel()
+        for name, param in model.named_parameters()
+        if any(name.startswith(prefix) for prefix in prefixes)
+    )
+
+
+def compute_sequence_loss(logits, labels, loss_mode: str, label_smoothing: float):
+    vocab_size = logits.shape[-1]
+    flat_logits = logits.view(-1, vocab_size)
+    flat_labels = labels.view(-1)
+    if loss_mode == "label_smoothing":
+        return F.cross_entropy(
+            flat_logits,
+            flat_labels,
+            ignore_index=-100,
+            label_smoothing=label_smoothing,
+        )
+    if loss_mode == "cross_entropy":
+        return F.cross_entropy(
+            flat_logits,
+            flat_labels,
+            ignore_index=-100,
+        )
+    raise ValueError(f"Unsupported loss_mode: {loss_mode}")
+
+
 def build_fresh_lora_model(language_model, config, logger):
     lora_cfg = config["model"]["lora"]
     peft_config = LoraConfig(
@@ -176,6 +244,7 @@ class CollaterFn:
         self.model = model
         self.log_token_stats = False
         self.token_log_remaining = 0
+        self.alter_only = False
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -216,14 +285,16 @@ class CollaterFn:
                 total_image_tokens_in_sample = total_tiles * self.model.num_image_token
                 total_sequence_length = len(input_ids) + len(answer_ids) + 1
                 logger.info(
-                    "[INFO] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    "[INFO][ALTER_ONLY=%s] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    self.alter_only,
                     len(pixel_values),
                     num_patches_list,
                     self.model.num_image_token,
                     total_image_tokens_in_sample,
                 )
                 logger.info(
-                    "[INFO] Text tokens - input: %s, answer: %s, total: %s",
+                    "[INFO][ALTER_ONLY=%s] Text tokens - input: %s, answer: %s, total: %s",
+                    self.alter_only,
                     len(input_ids),
                     len(answer_ids),
                     total_sequence_length,
@@ -323,7 +394,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
-def eval_model(model, val_loader, step, epoch, epochs):
+def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smoothing: float):
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
@@ -357,7 +428,12 @@ def eval_model(model, val_loader, step, epoch, epochs):
                 model.clear_qformer_text()
             if getattr(model, "trajectory_enabled", False):
                 model.clear_trajectory_inputs()
-            loss = outputs.loss
+            loss = compute_sequence_loss(
+                logits=outputs.logits,
+                labels=label_ids_batch,
+                loss_mode=loss_mode,
+                label_smoothing=label_smoothing,
+            )
             total_eval_loss += loss.item()
             total_eval_batchs += 1
             if total_eval_batchs == 200:
@@ -380,6 +456,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
     log_token_stats = bool(config["training"].get("log_token_stats", False))
+    loss_mode = str(config["training"].get("loss_mode", "cross_entropy"))
+    label_smoothing = float(config["training"].get("label_smoothing", 0.0))
+    lora_lr = float(config["training"].get("lora_learning_rate", lr))
+    bridge_lr = float(config["training"].get("bridge_learning_rate", config["training"].get("proj_learning_rate", lr)))
+    trajectory_lr = float(config["training"].get("trajectory_learning_rate", config["training"].get("proj_learning_rate", lr)))
     metrics_path = os.path.join(output_dir, "metrics.json")
 
     def save_metrics(metrics: dict):
@@ -391,33 +472,24 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
+    logger.info(
+        "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s",
+        loss_mode,
+        label_smoothing,
+        accum_steps,
+        weight_decay,
+    )
 
-    proj_lr = float(config["training"].get("proj_learning_rate", lr))
-    proj_param_names = {
-        "qformer_input_proj",
-        "qformer_to_mlp1_proj",
-        "trajectory_backbone",
-        "trajectory_cls_head",
-        "trajectory_token_projector",
-    }
-
-    proj_params = [
-        p for n, p in model.named_parameters()
-        if p.requires_grad and any(pn in n for pn in proj_param_names)
-    ]
-    other_params = [
-        p for n, p in model.named_parameters()
-        if p.requires_grad and not any(pn in n for pn in proj_param_names)
-    ]
-
-    logger.info(f"Param groups | proj_layers: {sum(p.numel() for p in proj_params):,} params @ lr={proj_lr} | lora+rest: {sum(p.numel() for p in other_params):,} params @ lr={lr}")
+    param_groups = build_optimizer_param_groups(
+        model,
+        lora_lr=lora_lr,
+        bridge_lr=bridge_lr,
+        trajectory_lr=trajectory_lr,
+    )
+    log_optimizer_group_summary(param_groups)
 
     optimizer = AdamW(
-        [
-            {"params": proj_params, "lr": proj_lr},
-            {"params": other_params, "lr": lr},
-        ],
+        param_groups,
         weight_decay=weight_decay,
         foreach=False,
     )
@@ -520,11 +592,17 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             if getattr(model, "trajectory_enabled", False):
                 model.clear_trajectory_inputs()
 
-            loss = outputs.loss / accum_steps
-            progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
+            raw_loss = compute_sequence_loss(
+                logits=outputs.logits,
+                labels=label_ids_batch,
+                loss_mode=loss_mode,
+                label_smoothing=label_smoothing,
+            )
+            loss = raw_loss / accum_steps
+            progress_bar.set_postfix(loss=f"{raw_loss.item():.4f}")
             loss.backward()
 
-            accumulated_loss_for_log += outputs.loss.item()
+            accumulated_loss_for_log += raw_loss.item()
 
             if i % accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -543,7 +621,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
-                val_loss = eval_model(model, val_loader, i, epoch, epochs)
+                val_loss = eval_model(model, val_loader, i, epoch, epochs, loss_mode, label_smoothing)
                 if val_loss is not None:
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
@@ -622,6 +700,16 @@ if __name__ == "__main__":
     if qformer_enabled(config):
         attach_qformer_bridge(model, config, logger=logger)
         align_qformer_bridge_runtime(model)
+        if trajectory_enabled(config):
+            trajectory_total = count_named_parameters(
+                model,
+                ("trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"),
+            )
+            logger.info(
+                "Trajectory params attached | mode=%s | total_branch_params=%s",
+                getattr(model, "trajectory_fusion_mode", "disabled"),
+                f"{trajectory_total:,}",
+            )
 
     logger.info("Applying LoRA...")
     model.language_model = prepare_model_for_kbit_training(model.language_model)
@@ -648,9 +736,10 @@ if __name__ == "__main__":
     collate_fn_wrapper = CollaterFn(tokenizer, model)
     collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    collate_fn_wrapper.alter_only = bool(config["data"].get("alter_only", False))
 
     logger.info(
-        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s",
+        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s | loss_mode=%s | label_smoothing=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "trajectory_enabled", False),
         getattr(model, "trajectory_fusion_mode", "disabled"),
@@ -659,6 +748,9 @@ if __name__ == "__main__":
         getattr(model, "qformer_num_query_tokens", getattr(model, "num_image_token", "unknown")),
         collate_fn_wrapper.log_token_stats,
         collate_fn_wrapper.token_log_remaining,
+        collate_fn_wrapper.alter_only,
+        config["training"].get("loss_mode", "cross_entropy"),
+        config["training"].get("label_smoothing", 0.0),
     )
 
     train_loader = DataLoader(

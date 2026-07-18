@@ -1,8 +1,8 @@
 experiment:
-  name: "wad_internvl3_training_traj_dual"
+  name: "wad_internvl3_training_traj_cls_case1_label_smoothing"
   version: "1.0"
-  description: "InternVL2-2B with Q-Former trajectory dual conditioning"
-  tags: ["internvl2", "navigation", "mllm", "trajectory", "dual"]
+  description: "InternVL2-2B with Q-Former trajectory cls_add conditioning and label smoothing"
+  tags: ["internvl2", "navigation", "mllm", "trajectory", "cls_add", "case1", "label_smoothing"]
 
 model:
   architecture: "internvl"
@@ -51,7 +51,7 @@ model:
 
 trajectory:
   enabled: true
-  fusion_mode: "dual"
+  fusion_mode: "cls_add"
   source_file: "json"
   num_objects: 6
   d_cat: 32
@@ -71,20 +71,20 @@ data:
   alter_only: true
 
 training:
-  output_dir: "./outputs/internvl3_2b_traj_dual"
+  output_dir: "./outputs/internvl3_2b_traj_cls_case1_label_smoothing"
   num_epochs: 5
   batch_size: 2
   gradient_accumulation_steps: 8
   learning_rate: 2e-4
   proj_learning_rate: 5e-4
-  lora_learning_rate: 2e-4
-  bridge_learning_rate: 5e-4
-  trajectory_learning_rate: 5e-4
+  lora_learning_rate: 0.0002
+  bridge_learning_rate: 0.0005
+  trajectory_learning_rate: 0.0005
   warmup_steps: 200
   warmup_ratio: 0.03
   weight_decay: 0.01
-  loss_mode: "cross_entropy"
-  label_smoothing: 0.0
+  loss_mode: "label_smoothing"
+  label_smoothing: 0.10
   bf16: true
   fp16: false
   gradient_checkpointing: true
