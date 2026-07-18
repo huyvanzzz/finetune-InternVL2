@@ -81,7 +81,7 @@ data:
 training:
   output_dir: "./outputs/pretrain_traj_cls"
   num_epochs: 50
-  batch_size: 32
+  batch_size: 24
   gradient_accumulation_steps: 1
   use_accelerate: true
   learning_rate: 1e-5
