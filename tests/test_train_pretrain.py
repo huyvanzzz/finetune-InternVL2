@@ -22,6 +22,7 @@ from train_pretrain import (
     inspect_optimizer_param_groups,
     _DynamicVitDebugFilter,
     log_trainable_parameter_summary,
+    log_trajectory_dropout_summary,
     log_trajectory_path_gradients,
     log_runtime_batch_debug,
     reduce_token_weighted_loss,
@@ -356,6 +357,28 @@ def test_log_trainable_parameter_summary_can_dump_names():
     joined = "\n".join(messages)
     assert "trajectory_backbone.weight" in joined
     assert "TOTAL_TRAINABLE" in joined
+
+
+def test_log_trajectory_dropout_summary_reports_config_and_modules():
+    model = SimpleNamespace(
+        trajectory_backbone=torch.nn.Sequential(torch.nn.Dropout(0.05), torch.nn.Linear(2, 2)),
+        trajectory_cls_head=torch.nn.Dropout(0.1),
+        trajectory_token_projector=torch.nn.Identity(),
+    )
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    log_trajectory_dropout_summary(model, {"trajectory": {"dropout": 0.05}}, _FakeLogger())
+
+    joined = "\n".join(messages)
+    assert "Trajectory dropout config" in joined
+    assert "trajectory.dropout=0.0500" in joined
+    assert "trajectory_backbone:dropout_modules=1" in joined
+    assert "trajectory_cls_head:dropout_modules=1" in joined
+    assert "trajectory_token_projector:dropout_modules=0" in joined
 
 
 def test_freeze_modules_for_pretrain_cls_add_only_enables_cls_head():
