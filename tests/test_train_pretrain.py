@@ -571,7 +571,7 @@ def test_dynamic_vit_debug_filter_drops_entire_forbidden_write():
     filtered.write("Pretrain epoch 1 loss=3.0]dynamic ViT batch size: 72, images per sample: 3.0")
     filtered.write("\nnext line")
 
-    assert stream.getvalue() == "\nnext line"
+    assert stream.getvalue() == "next line"
 
 
 def test_early_stopping_state_tracks_best_and_stops_after_patience():
