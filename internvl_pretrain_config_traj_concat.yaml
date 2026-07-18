@@ -94,7 +94,7 @@ training:
   weight_decay: 0.01
   loss_mode: "label_smoothing"
   label_smoothing: 0.10
-  early_stopping_patience: 3
+  early_stopping_patience: 8
   early_stopping_min_delta: 0.001
   early_stopping_burn_in_epochs: 1
   restore_best_checkpoint: true
