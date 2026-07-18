@@ -19,7 +19,7 @@ fancycompleter==0.9.1
 filelock==3.15.4
 frozenlist==1.4.1
 fsspec==2024.5.0
-huggingface-hub==0.24.3
+huggingface-hub==0.25.2
 idna==3.7
 inquirerpy==0.3.4
 Jinja2==3.1.4
