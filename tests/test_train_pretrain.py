@@ -7,7 +7,9 @@ import train_pretrain
 from train_pretrain import (
     EarlyStoppingState,
     PretrainCollaterFn,
+    _active_trajectory_heads,
     _build_optimizer,
+    _freeze_modules_for_pretrain,
     _build_run_metadata,
     _write_training_state,
     build_dataloader_kwargs,
@@ -21,13 +23,14 @@ from train_pretrain import (
 
 
 class _DummyModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, fusion_mode: str = "cls_add"):
         super().__init__()
         self.template = "internlm2-chat"
         self.system_message = "You are a navigation assistant."
         self.num_image_token = 32
         self.qformer_enabled = True
         self.trajectory_enabled = True
+        self.trajectory_fusion_mode = fusion_mode
         self.qformer_calls = []
         self.trajectory_calls = []
         self.qformer = torch.nn.Linear(4, 4)
@@ -193,6 +196,42 @@ def test_build_optimizer_separates_trajectory_and_bridge_groups():
 
     lrs = sorted(group["lr"] for group in optimizer.param_groups)
     assert lrs == [1e-05, 3e-05, 1e-04]
+
+
+def test_freeze_modules_for_pretrain_cls_add_only_enables_cls_head():
+    model = _DummyModel("cls_add")
+
+    _freeze_modules_for_pretrain(model)
+
+    heads = _active_trajectory_heads(model)
+    assert heads == {
+        "trajectory_cls_head": True,
+        "trajectory_token_projector": False,
+    }
+
+
+def test_freeze_modules_for_pretrain_concat_only_enables_token_projector():
+    model = _DummyModel("concat")
+
+    _freeze_modules_for_pretrain(model)
+
+    heads = _active_trajectory_heads(model)
+    assert heads == {
+        "trajectory_cls_head": False,
+        "trajectory_token_projector": True,
+    }
+
+
+def test_freeze_modules_for_pretrain_dual_enables_both_heads():
+    model = _DummyModel("dual")
+
+    _freeze_modules_for_pretrain(model)
+
+    heads = _active_trajectory_heads(model)
+    assert heads == {
+        "trajectory_cls_head": True,
+        "trajectory_token_projector": True,
+    }
 
 
 def test_inspect_optimizer_param_groups_detects_missing_trainable_params():

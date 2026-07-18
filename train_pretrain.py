@@ -593,6 +593,12 @@ def build_model_and_tokenizer(config: Dict, logger):
 
     model.language_model.requires_grad_(False)
     _freeze_modules_for_pretrain(model)
+    logger.info(
+        "Mode-gated trajectory heads | mode=%s | cls_head_trainable=%s | token_projector_trainable=%s",
+        getattr(model, "trajectory_fusion_mode", "unknown"),
+        _active_trajectory_heads(model)["trajectory_cls_head"],
+        _active_trajectory_heads(model)["trajectory_token_projector"],
+    )
     model.train()
     return model, tokenizer
 
@@ -611,12 +617,30 @@ def _freeze_modules_for_pretrain(model):
         "qformer_input_proj",
         "qformer_to_mlp1_proj",
         "trajectory_backbone",
-        "trajectory_cls_head",
-        "trajectory_token_projector",
     ):
         module = getattr(model, module_name, None)
         if module is not None:
             module.requires_grad_(True)
+
+    fusion_mode = str(getattr(model, "trajectory_fusion_mode", "cls_add"))
+    cls_head = getattr(model, "trajectory_cls_head", None)
+    token_projector = getattr(model, "trajectory_token_projector", None)
+
+    if cls_head is not None:
+        cls_head.requires_grad_(fusion_mode in {"cls_add", "dual"})
+    if token_projector is not None:
+        token_projector.requires_grad_(fusion_mode in {"concat", "dual"})
+
+
+def _active_trajectory_heads(model) -> Dict[str, bool]:
+    cls_head = getattr(model, "trajectory_cls_head", None)
+    token_projector = getattr(model, "trajectory_token_projector", None)
+    return {
+        "trajectory_cls_head": bool(cls_head is not None and any(p.requires_grad for p in cls_head.parameters())),
+        "trajectory_token_projector": bool(
+            token_projector is not None and any(p.requires_grad for p in token_projector.parameters())
+        ),
+    }
 
 
 def build_dataloaders(config: Dict, model, tokenizer):
