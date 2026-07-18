@@ -106,8 +106,6 @@ class _DynamicVitDebugFilter:
 def install_quiet_training_output_filter():
     if not isinstance(sys.stdout, _DynamicVitDebugFilter):
         sys.stdout = _DynamicVitDebugFilter(sys.stdout)
-    if not isinstance(sys.stderr, _DynamicVitDebugFilter):
-        sys.stderr = _DynamicVitDebugFilter(sys.stderr)
 
 
 def suppress_loaded_model_debug_logs(model, logger):
@@ -1096,6 +1094,8 @@ def eval_pretrain(model, val_loader, epoch: int, epochs: int, device: torch.devi
             val_loader,
             desc=f"Pretrain eval {epoch + 1}/{epochs}",
             leave=False,
+            dynamic_ncols=True,
+            file=sys.__stderr__,
             disable=accelerator is not None and not accelerator.is_main_process,
         )
         for batch in iterator:
@@ -1293,6 +1293,9 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
             desc=f"Pretrain epoch {epoch + 1}/{epochs}",
             total=len(train_loader),
             initial=initial_step,
+            leave=False,
+            dynamic_ncols=True,
+            file=sys.__stderr__,
             disable=not is_main_process,
         )
         for step, batch in enumerate(progress_bar, start=initial_step + 1):
