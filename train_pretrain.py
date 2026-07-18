@@ -81,9 +81,19 @@ class _DynamicVitDebugFilter:
     def __init__(self, stream, forbidden_text: str = FORBIDDEN_DYNAMIC_VIT_DEBUG_TEXT):
         self.stream = stream
         self.forbidden_text = forbidden_text
+        self._drop_next_newline = False
 
     def write(self, text):
+        if self._drop_next_newline:
+            self._drop_next_newline = False
+            if text in {"\n", "\r\n"}:
+                return 0
+            if text.startswith("\r\n"):
+                text = text[2:]
+            elif text.startswith("\n"):
+                text = text[1:]
         if self.forbidden_text in text:
+            self._drop_next_newline = not text.endswith(("\n", "\r\n"))
             return 0
         if text:
             return self.stream.write(text)
@@ -1328,7 +1338,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                                 sec_per_batch = elapsed / batches_done
                                 eta_sec = sec_per_batch * max(total_batches - step, 0)
                                 logger.info(
-                                    "Pretrain epoch %s/%s | step %s/%s | opt_step=%s | loss=%.4f | sec/batch=%.2f | eta_min=%.1f",
+                                    "Pretrain e%s/%s s%s/%s opt=%s loss=%.4f sec=%.2f eta=%.1fm",
                                     epoch + 1,
                                     epochs,
                                     step,
@@ -1383,7 +1393,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                         sec_per_batch = elapsed / batches_done
                         eta_sec = sec_per_batch * max(total_batches - step, 0)
                         logger.info(
-                            "Pretrain epoch %s/%s | step %s/%s | opt_step=%s | loss=%.4f | sec/batch=%.2f | eta_min=%.1f",
+                            "Pretrain e%s/%s s%s/%s opt=%s loss=%.4f sec=%.2f eta=%.1fm",
                             epoch + 1,
                             epochs,
                             step,
