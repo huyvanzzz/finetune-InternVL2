@@ -17,6 +17,25 @@ from preprocessing import format_ground_truth, get_response_format
 from trajectory_branch import build_trajectory_source_from_config
 
 
+def has_nonempty_qa(sample: Dict) -> bool:
+    qa = sample.get("QA")
+    return bool(qa and str(qa.get("Q", "")).strip())
+
+
+def summarize_qa_rows(rows) -> Dict[str, int]:
+    total = len(rows)
+    with_qa = sum(1 for row in rows if has_nonempty_qa(row))
+    return {
+        "total": total,
+        "with_qa": with_qa,
+        "without_qa": total - with_qa,
+    }
+
+
+def filter_alter_only_rows(rows):
+    return [row for row in rows if not has_nonempty_qa(row)]
+
+
 class WADDatasetForInternVL(Dataset):
     def __init__(
         self,
@@ -74,22 +93,23 @@ class WADDatasetForInternVL(Dataset):
         else:
             text_content = """
 
-Analyze: location, weather, traffic, scene → then give instruction.
+Analyze: location, weather, traffic, scene -> then give instruction.
 
 Follow Chain-of-Thought reasoning:
 1. Perception: Extract "location", "weather", and "traffic".
 2. Comprehension: Synthesize details into the "scene".
 3. Decision: Formulate the final "instruction"."""
 
-        has_question = sample.get("QA") and sample["QA"].get("Q")
+        has_question = has_nonempty_qa(sample)
         if has_question:
+            question_text = sample["QA"]["Q"]
             if self.response_format == "direct_text":
                 text_content += (
                     "\nFocus on obstacles, nearby people or vehicles, free walking space, direction, and safety."
-                    f"\nQuestion: {sample['QA']['Q']}"
+                    f"\nQuestion: {question_text}"
                 )
             else:
-                text_content += f"\n\nQuestion: {sample['QA']['Q']}"
+                text_content += f"\n\nQuestion: {question_text}"
             if self.response_format == "direct_text":
                 text_content += "\nAnswer the question directly in natural language."
             else:
@@ -124,6 +144,7 @@ Follow Chain-of-Thought reasoning:
             "qformer_text": text_content.strip(),
             "answer": answer,
             "has_trajectory": False,
+            "has_qa": has_nonempty_qa(sample),
         }
         if self.trajectory_source is not None:
             trajectory = self.trajectory_source.encode(frame_path, last_frame_id)
@@ -188,7 +209,12 @@ def _print_debug_samples(name: str, dataset: WADDatasetForInternVL, subset: Subs
     print(f"[DEBUG] {name} prompt/trajectory samples:")
     for local_i, idx in enumerate(subset.indices[:limit], start=1):
         snapshot = dataset.get_debug_snapshot(idx)
-        print(f"[DEBUG] {name} sample {local_i} | frame_path={snapshot['frame_path']} | last_frame_id={snapshot['last_frame_id']}")
+        print(
+            f"[DEBUG] {name} sample {local_i} | "
+            f"frame_path={snapshot['frame_path']} | "
+            f"last_frame_id={snapshot['last_frame_id']} | "
+            f"has_qa={snapshot['has_qa']}"
+        )
         print(f"[DEBUG] question: {snapshot['question']}")
         print(f"[DEBUG] qformer_text: {snapshot['qformer_text']}")
         print(f"[DEBUG] answer: {snapshot['answer']}")
@@ -205,6 +231,9 @@ def _print_debug_samples(name: str, dataset: WADDatasetForInternVL, subset: Subs
 def build_dataset(config: Dict):
     response_format = get_response_format(config)
     trajectory_source = build_trajectory_source_from_config(config)
+    alter_only = bool(config["data"].get("alter_only", False))
+    debug_dataset_stats = bool(config["training"].get("debug_dataset_stats", False))
+    debug_dataset_samples = int(config["training"].get("debug_dataset_samples", 2))
 
     print("Loading metadata...")
     metadata = load_dataset(
@@ -250,13 +279,13 @@ def build_dataset(config: Dict):
     architecture = config["model"]["architecture"]
     if architecture == "qwen":
         image_size = None
-        print("✓ Using dynamic resolution for Qwen")
+        print("[OK] Using dynamic resolution for Qwen")
     elif architecture == "internvl":
         image_size = (448, 448)
-        print(f"✓ Using fixed tile size {image_size} for InternVL")
+        print(f"[OK] Using fixed tile size {image_size} for InternVL")
     else:
         image_size = tuple(config["model"]["vision"]["image_size"])
-        print(f"✓ Using image size {image_size} for {architecture}")
+        print(f"[OK] Using image size {image_size} for {architecture}")
 
     train_dataset = WADDatasetForInternVL(
         metadata_dataset=metadata,
@@ -278,7 +307,30 @@ def build_dataset(config: Dict):
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(train_dataset, val_indices)
 
-    print(f"✓ Train: {len(train_subset)}, Val: {len(val_subset)}")
+    print(f"[OK] Train: {len(train_subset)}, Val: {len(val_subset)}")
+    if debug_dataset_stats:
+        train_rows_before = [train_dataset.metadata[idx] for idx in train_subset.indices]
+        val_rows_before = [train_dataset.metadata[idx] for idx in val_subset.indices]
+        print(
+            "[DEBUG] QA stats before alter-only filter | "
+            f"train={summarize_qa_rows(train_rows_before)} | "
+            f"val={summarize_qa_rows(val_rows_before)}"
+        )
+
+    if alter_only:
+        train_subset = Subset(
+            train_dataset,
+            [idx for idx in train_subset.indices if not has_nonempty_qa(train_dataset.metadata[idx])],
+        )
+        val_subset = Subset(
+            train_dataset,
+            [idx for idx in val_subset.indices if not has_nonempty_qa(train_dataset.metadata[idx])],
+        )
+        print(
+            "[DEBUG] alter-only filter applied | "
+            f"train_after={len(train_subset)} | val_after={len(val_subset)}"
+        )
+
     if trajectory_source is not None:
         train_exact, train_empty = _trajectory_match_stats(train_dataset, train_subset)
         val_exact, val_empty = _trajectory_match_stats(train_dataset, val_subset)
@@ -288,12 +340,29 @@ def build_dataset(config: Dict):
             f"train(exact={train_exact}, empty={train_empty}) | "
             f"val(exact={val_exact}, empty={val_empty})"
         )
-        _print_debug_samples("train", train_dataset, train_subset, limit=2)
-        _print_debug_samples("val", train_dataset, val_subset, limit=2)
+        _print_debug_samples("train", train_dataset, train_subset, limit=debug_dataset_samples)
+        _print_debug_samples("val", train_dataset, val_subset, limit=debug_dataset_samples)
 
     eval_limit = config["data"].get("eval_limit", 200)
+    val_before_eval_limit = len(val_subset)
     if len(val_subset) > eval_limit:
-        print(f"  Limiting eval dataset: {len(val_subset)} → {eval_limit} samples")
+        print(f"[DEBUG] Limiting eval dataset: {len(val_subset)} -> {eval_limit} samples")
         val_subset = Subset(val_subset, list(range(eval_limit)))
+
+    if debug_dataset_stats:
+        print(
+            "[DEBUG] Final split stats | "
+            f"train={len(train_subset)} | "
+            f"val_before_eval_limit={val_before_eval_limit} | "
+            f"val_after_eval_limit={len(val_subset)}"
+        )
+        if alter_only:
+            train_rows_after = [train_dataset.metadata[idx] for idx in train_subset.indices]
+            val_rows_after = [train_dataset.metadata[idx] for idx in val_subset.indices]
+            print(
+                "[DEBUG] QA stats after alter-only filter | "
+                f"train={summarize_qa_rows(train_rows_after)} | "
+                f"val={summarize_qa_rows(val_rows_after)}"
+            )
 
     return train_subset, val_subset

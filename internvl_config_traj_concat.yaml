@@ -55,11 +55,12 @@ trajectory:
   source_file: "json"
   num_objects: 6
   d_cat: 32
+  d_dir: 16
   d_numeric_hidden: 64
-  d_traj: 128
+  d_traj: 384
   num_heads: 4
-  num_layers: 2
-  ffn_dim: 256
+  num_layers: 4
+  ffn_dim: 768
 
 data:
   name: "minhdang0901/WAD_Images_All_Size"
@@ -67,6 +68,7 @@ data:
   train_split: 0.9
   seed: 42
   response_format: "direct_text"
+  alter_only: true
 
 training:
   output_dir: "./outputs/internvl3_2b_traj_concat"
@@ -75,9 +77,14 @@ training:
   gradient_accumulation_steps: 8
   learning_rate: 2e-4
   proj_learning_rate: 5e-4
+  lora_learning_rate: 2e-4
+  bridge_learning_rate: 5e-4
+  trajectory_learning_rate: 5e-4
   warmup_steps: 200
   warmup_ratio: 0.03
   weight_decay: 0.01
+  loss_mode: "cross_entropy"
+  label_smoothing: 0.0
   bf16: true
   fp16: false
   gradient_checkpointing: true
@@ -94,6 +101,8 @@ training:
   start_step: 0
   log_token_stats: true
   token_log_batches: 5
+  debug_dataset_stats: true
+  debug_dataset_samples: 2
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]
