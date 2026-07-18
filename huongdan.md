@@ -73,7 +73,7 @@ Thu tu dung la:
 
 ```bash
 pip install --upgrade pip setuptools wheel
-pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
+pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
 pip install --no-cache-dir --no-deps -r requirements.txt
 MAX_JOBS=4 pip install --no-build-isolation --no-cache-dir flash-attn==2.6.3
 ```
@@ -83,6 +83,7 @@ Ly do:
 - `requirements.txt` chi giu dependency Python thong thuong.
 - `requirements.txt` duoc cai bang `--no-deps` de khong cho pip resolver tu y doi bo `torch` da cai truoc do.
 - `flash-attn` can `torch` co san truoc khi build.
+- Muc tieu chay nhanh nhat voi `flash-attn` tren branch nay la dung CUDA toolkit `12.8` va bo `torch` `cu128`.
 - Cai `flash-attn` bang `--no-build-isolation` de tranh loi `No module named 'torch'`.
 
 ## 6. Verify moi truong
@@ -90,6 +91,7 @@ Ly do:
 ```bash
 python -c "import torch; print(torch.__version__)"
 python -c "import torchvision, torchaudio; print(torchvision.__version__, torchaudio.__version__)"
+python -c "import torch; print('torch cuda =', torch.version.cuda)"
 python -c "import transformers; print(transformers.__version__)"
 python -c "import accelerate; print(accelerate.__version__)"
 python -c "import bitsandbytes as bnb; print(bnb.__version__)"
@@ -97,6 +99,8 @@ python -c "import flash_attn; print(flash_attn.__version__)"
 ```
 
 Neu `flash_attn` import loi, gui lai dung traceback do.
+
+Neu `torch.version.cuda` khong ra `12.8`, hoac `nvcc --version` khong ra `12.8`, thi khong nen build `flash-attn` tren instance do.
 
 ## 7. Kiem tra split QA
 

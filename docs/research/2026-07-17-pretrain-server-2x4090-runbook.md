@@ -22,7 +22,7 @@ Thu tu dung:
 
 ```bash
 pip install --upgrade pip setuptools wheel
-pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
+pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
 pip install --no-cache-dir --no-deps -r requirements.txt
 MAX_JOBS=4 pip install --no-build-isolation --no-cache-dir flash-attn==2.6.3
 ```
@@ -32,16 +32,20 @@ Ly do:
 - `flash-attn` can `torch` co san truoc khi build.
 - Cach cai tren tranh loi `ModuleNotFoundError: No module named 'torch'`.
 - `requirements.txt` vi vay chi giu dependency Python thong thuong va duoc cai bang `--no-deps` de khong cho pip doi bo `torch`.
+- De uu tien toc do cao nhat voi `flash-attn`, branch nay nen dung CUDA toolkit `12.8` va PyTorch `cu128`.
 
 ## Verify sau khi cai
 
 ```bash
 python -c "import torch; print(torch.__version__)"
 python -c "import torchvision, torchaudio; print(torchvision.__version__, torchaudio.__version__)"
+python -c "import torch; print('torch cuda =', torch.version.cuda)"
 python -c "import bitsandbytes as bnb; print(bnb.__version__)"
 python -c "import accelerate; print(accelerate.__version__)"
 python -c "import flash_attn; print(flash_attn.__version__)"
 ```
+
+Neu `torch.version.cuda` hoac `nvcc --version` khong khop `12.8`, can doi template/container thay vi co build cuong ep tren instance do.
 
 ## Speed baseline cho 2x4090
 
