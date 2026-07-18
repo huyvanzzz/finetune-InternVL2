@@ -112,6 +112,7 @@ def test_extract_feature_with_qformer_matches_llm_embedding_dtype(monkeypatch):
 
 def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
     model = _DummyModel("cls_add")
+    model._last_trajectory_debug = {"backbone_stage_debug": {"tokens_output_abs_mean": 0.5}}
 
     monkeypatch.setattr(
         qformer_bridge,
@@ -129,6 +130,7 @@ def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
     qformer_bridge._extract_feature_with_qformer(model, pixel_values)
 
     debug = model._last_trajectory_debug
+    assert debug["backbone_stage_debug"]["tokens_output_abs_mean"] == 0.5
     assert debug["fusion_mode"] == "cls_add"
     assert debug["traj_path_active"] is True
     assert debug["traj_cls_requires_grad"] is True
