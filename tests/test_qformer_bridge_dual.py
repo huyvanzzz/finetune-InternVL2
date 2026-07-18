@@ -112,7 +112,6 @@ def test_extract_feature_with_qformer_matches_llm_embedding_dtype(monkeypatch):
 
 def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
     model = _DummyModel("cls_add")
-    model._last_trajectory_debug = {"backbone_stage_debug": {"tokens_output_abs_mean": 0.5}}
 
     monkeypatch.setattr(
         qformer_bridge,
@@ -123,7 +122,10 @@ def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
     monkeypatch.setattr(
         qformer_bridge,
         "build_trajectory_features",
-        lambda model, batch_size, device: torch.zeros(batch_size, 1, 4, device=device, dtype=torch.float32, requires_grad=True),
+        lambda model, batch_size, device: (
+            setattr(model, "_last_trajectory_debug", {"backbone_stage_debug": {"tokens_output_abs_mean": 0.5}})
+            or torch.zeros(batch_size, 1, 4, device=device, dtype=torch.float32, requires_grad=True)
+        ),
     )
 
     pixel_values = torch.ones(1, 3, 448, 448, dtype=torch.float32)
