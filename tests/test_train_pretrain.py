@@ -167,6 +167,36 @@ def test_pretrain_collater_skips_token_logging_when_logger_is_uninitialized(monk
     assert collater.token_log_remaining == 0
 
 
+def test_log_runtime_batch_debug_includes_trajectory_path_debug(monkeypatch):
+    model = _DummyModel()
+    model._last_trajectory_debug = {"fusion_mode": "cls_add", "traj_cls_requires_grad": True}
+    batch = (
+        torch.ones(1, 4, dtype=torch.long),
+        torch.ones(1, 4, dtype=torch.long),
+        torch.ones(1, 4, dtype=torch.long),
+        torch.zeros(1, 3, 4, 4),
+        (torch.ones(1, 5, dtype=torch.long), torch.ones(1, 5, dtype=torch.long)),
+        (
+            torch.ones(1, 6, dtype=torch.long),
+            torch.ones(1, 6, dtype=torch.long),
+            torch.ones(1, 6, 6, dtype=torch.float32),
+            torch.ones(1, 6, dtype=torch.long),
+        ),
+        [],
+    )
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    monkeypatch.setattr(train_pretrain, "get_cuda_memory_stats", lambda device: {"allocated_mb": 0.0})
+
+    log_runtime_batch_debug(batch, model, torch.device("cpu"), _FakeLogger(), global_step=1, phase="pre_forward")
+
+    assert any("Trajectory path debug" in message for message in messages)
+
+
 def test_resolve_warmup_steps_prefers_ratio_policy():
     config = {
         "training": {

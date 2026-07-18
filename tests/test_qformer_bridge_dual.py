@@ -108,3 +108,29 @@ def test_extract_feature_with_qformer_matches_llm_embedding_dtype(monkeypatch):
     visual_embeds = qformer_bridge._extract_feature_with_qformer(model, pixel_values)
 
     assert visual_embeds.dtype == torch.bfloat16
+
+
+def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
+    model = _DummyModel("cls_add")
+
+    monkeypatch.setattr(
+        qformer_bridge,
+        "_extract_vit_tokens",
+        lambda self, pixel_values: torch.ones(pixel_values.shape[0], 32, 4, dtype=torch.float32, device=pixel_values.device),
+    )
+    monkeypatch.setattr(qformer_bridge, "_ensure_bridge_device", lambda self, reference: None)
+    monkeypatch.setattr(
+        qformer_bridge,
+        "build_trajectory_features",
+        lambda model, batch_size, device: torch.zeros(batch_size, 1, 4, device=device, dtype=torch.float32, requires_grad=True),
+    )
+
+    pixel_values = torch.ones(1, 3, 448, 448, dtype=torch.float32)
+    qformer_bridge._extract_feature_with_qformer(model, pixel_values)
+
+    debug = model._last_trajectory_debug
+    assert debug["fusion_mode"] == "cls_add"
+    assert debug["traj_path_active"] is True
+    assert debug["traj_cls_requires_grad"] is True
+    assert debug["mlp1_inputs_requires_grad_before_add"] is True
+    assert debug["mlp1_inputs_requires_grad_after_add"] is True

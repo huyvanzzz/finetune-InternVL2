@@ -261,6 +261,16 @@ def _extract_feature_with_qformer(self, pixel_values):
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
     mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    trajectory_debug = {
+        "fusion_mode": getattr(self, "trajectory_fusion_mode", None),
+        "traj_path_active": False,
+        "traj_source": None,
+        "traj_cls_requires_grad": False,
+        "traj_cls_shape": None,
+        "traj_cls_dtype": None,
+        "mlp1_inputs_requires_grad_before_add": bool(mlp1_inputs.requires_grad),
+        "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
+    }
     dual_traj_tokens = None
     dual_object_mask = None
     if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
@@ -271,6 +281,16 @@ def _extract_feature_with_qformer(self, pixel_values):
         )
         traj_cls = self.trajectory_cls_head(dual_traj_tokens, dual_object_mask).to(mlp1_inputs.dtype)
         mlp1_inputs = mlp1_inputs + traj_cls
+        trajectory_debug.update(
+            {
+                "traj_path_active": True,
+                "traj_source": "dual_cls_head",
+                "traj_cls_requires_grad": bool(traj_cls.requires_grad),
+                "traj_cls_shape": list(traj_cls.shape),
+                "traj_cls_dtype": str(traj_cls.dtype),
+                "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
+            }
+        )
     elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
         traj_cls = build_trajectory_features(
             self,
@@ -278,6 +298,17 @@ def _extract_feature_with_qformer(self, pixel_values):
             device=mlp1_inputs.device,
         ).to(mlp1_inputs.dtype)
         mlp1_inputs = mlp1_inputs + traj_cls
+        trajectory_debug.update(
+            {
+                "traj_path_active": True,
+                "traj_source": "cls_add",
+                "traj_cls_requires_grad": bool(traj_cls.requires_grad),
+                "traj_cls_shape": list(traj_cls.shape),
+                "traj_cls_dtype": str(traj_cls.dtype),
+                "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
+            }
+        )
+    self._last_trajectory_debug = trajectory_debug
     mlp1_dtype = next(self.mlp1.parameters()).dtype
     mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
     visual_tokens = self.mlp1(mlp1_inputs)

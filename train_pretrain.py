@@ -347,6 +347,14 @@ def log_runtime_batch_debug(batch, model, device: torch.device, logger, global_s
         summary["pixel_values_shape"],
         memory,
     )
+    trajectory_debug = getattr(model, "_last_trajectory_debug", None)
+    if trajectory_debug is not None:
+        logger.info(
+            "Trajectory path debug | phase=%s | global_step=%s | debug=%s",
+            phase,
+            global_step,
+            trajectory_debug,
+        )
 
 
 class PretrainCollaterFn:
