@@ -1,109 +1,78 @@
-# Runbook pretrain trajectory trên server 2x RTX 4090
+# Runbook pretrain trajectory tren server 2x RTX 4090
 
-## Mặc định
+## Runtime truth
 
 - Branch: `feature/pretrain-server-setup`
-- Entry point: `train_pretrain.py`
-- Mode mặc định: `cls_add`
-- Config mặc định: `internvl_pretrain_config_traj_cls.yaml`
-- Pretrain không train LoRA.
-- Trainable chỉ gồm trajectory branch và hai bridge projections.
-- Speed baseline dùng `4-bit + bf16 + gradient_checkpointing=false`.
-- `num_workers=4` là 4 worker mỗi process, không phải toàn server.
-- QA pretrain dùng 3 file split cố định:
-  - `json/question_train_split_train.jsonl`
-  - `json/question_train_split_val.jsonl`
-  - `json/question_train_split_test.jsonl`
-  - manifest: `json/question_train_split_manifest.json`
+- Entrypoint: `train_pretrain.py`
+- Mode mac dinh: `cls_add`
+- Config mac dinh: `internvl_pretrain_config_traj_cls.yaml`
+- Pretrain khong train LoRA.
+- Trainable chi gom:
+  - trajectory backbone
+  - trajectory cls head
+  - trajectory token projector
+  - `qformer_input_proj`
+  - `qformer_to_mlp1_proj`
 
-## Setup nhanh
+## Dependency policy
 
-```bash
-git clone https://github.com/huyvanzzz/finetune-InternVL2.git
-cd finetune-InternVL2
-git checkout feature/pretrain-server-setup
-pip install -r requirements.txt
-```
+Khong cai `torch` va `flash-attn` chung trong `requirements.txt`.
 
-Kiểm tra GPU:
+Thu tu dung:
 
 ```bash
-nvidia-smi
-python - <<'PY'
-import torch
-print(torch.__version__)
-print(torch.cuda.device_count())
-print(torch.cuda.get_device_name(0))
-PY
+pip install --upgrade pip setuptools wheel
+pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
+pip install --no-cache-dir -r requirements.txt
+MAX_JOBS=4 pip install --no-build-isolation --no-cache-dir flash-attn==2.6.3
 ```
 
-## Accelerate config
+Ly do:
 
-Chạy một lần:
+- `flash-attn` can `torch` co san truoc khi build.
+- Cach cai tren tranh loi `ModuleNotFoundError: No module named 'torch'`.
+- `requirements.txt` vi vay chi giu dependency Python thong thuong.
+
+## Verify sau khi cai
 
 ```bash
-accelerate config
+python -c "import torch; print(torch.__version__)"
+python -c "import bitsandbytes as bnb; print(bnb.__version__)"
+python -c "import accelerate; print(accelerate.__version__)"
+python -c "import flash_attn; print(flash_attn.__version__)"
 ```
 
-Khuyến nghị cho 2 RTX 4090:
+## Speed baseline cho 2x4090
 
-- compute environment: local machine
-- distributed type: multi-GPU
-- number of processes: 2
-- mixed precision: bf16
-- dynamo: no
+- quantization: 4-bit
+- dtype: bf16
+- gradient checkpointing: off truoc
+- world size: 2
+- `num_workers`: 4 moi process
+- mode dau tien de smoke va benchmark: `cls_add`
+
+Neu OOM hoac VRAM qua sat, moi bat `gradient_checkpointing=true`.
+
+## Split QA
+
+Runtime dung 3 file co san:
+
+- `json/question_train_split_train.jsonl`
+- `json/question_train_split_val.jsonl`
+- `json/question_train_split_test.jsonl`
+
+Manifest:
+
+- `json/question_train_split_manifest.json`
 
 ## Smoke run
 
-Nếu cần tạo lại split từ file nguồn:
-
-```bash
-python scripts/prepare_pretrain_qa_splits.py \
-  --input json/question_train.jsonl \
-  --output_dir json \
-  --seed 42
-```
-
-Chạy smoke ngắn bằng `cls_add`:
-
 ```bash
 accelerate launch --num_processes 2 train_pretrain.py \
   --config internvl_pretrain_config_traj_cls.yaml
-```
-
-Nếu OOM, bật fallback VRAM bằng cách đổi trong config:
-
-```yaml
-training:
-  gradient_checkpointing: true
-```
-
-## Train các mode
-
-`cls_add` là baseline chính:
-
-```bash
-accelerate launch --num_processes 2 train_pretrain.py \
-  --config internvl_pretrain_config_traj_cls.yaml
-```
-
-`concat`:
-
-```bash
-accelerate launch --num_processes 2 train_pretrain.py \
-  --config internvl_pretrain_config_traj_concat.yaml
-```
-
-`dual`:
-
-```bash
-accelerate launch --num_processes 2 train_pretrain.py \
-  --config internvl_pretrain_config_traj_dual.yaml
 ```
 
 ## Resume
-
-Resume từ checkpoint local:
 
 ```bash
 accelerate launch --num_processes 2 train_pretrain.py \
@@ -111,40 +80,21 @@ accelerate launch --num_processes 2 train_pretrain.py \
   --checkpoint outputs/pretrain_traj_cls/<run_id>/last
 ```
 
-Log cần thấy:
+Log can thay:
 
 - resolved checkpoint path
 - `training_state.json`
 - `early_stopping_state.json`
-- restored `best_epoch`, `best_val_loss`, `bad_epochs`
+- restored epoch / step / best val loss
 
-## Debug cần kiểm khi bắt đầu run
+## Debug can kiem
 
-Log đầu run phải có:
+Log dau run nen co:
 
-- world size, rank, device
-- batch size, accumulation, global batch
-- quantization, bf16, gradient checkpointing
-- split stats train/val/test
+- world size / rank / device
+- batch size / accumulation / global batch
 - FlashAttention runtime status
 - trainable parameter summary
-- optimizer param group health
-- sample question/answer/qformer text/trajectory
-- token count
-
-## Benchmark nên chạy
-
-Chạy ngắn để so:
-
-- `gradient_checkpointing=false`
-- `gradient_checkpointing=true` nếu OOM hoặc muốn thử batch lớn hơn
-- `num_workers=4/process`
-- `num_workers=8/process`
-
-So sánh bằng:
-
-- samples/sec
-- optimizer updates/sec
-- step time
-- VRAM peak
-- data loading time nếu log profiling cho thấy bottleneck
+- optimizer param groups
+- sample question / answer / qformer text / trajectory
+- tong token input
