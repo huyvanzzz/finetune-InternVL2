@@ -265,18 +265,6 @@ def _extract_feature_with_qformer(self, pixel_values):
     if getattr(self, "_enable_trajectory_grad_debug", False) and mlp1_inputs.requires_grad:
         mlp1_inputs.retain_grad()
     debug_tensors["mlp1_inputs_before_add"] = mlp1_inputs
-    existing_trajectory_debug = getattr(self, "_last_trajectory_debug", None)
-    trajectory_debug = dict(existing_trajectory_debug or {})
-    trajectory_debug.update({
-        "fusion_mode": getattr(self, "trajectory_fusion_mode", None),
-        "traj_path_active": False,
-        "traj_source": None,
-        "traj_cls_requires_grad": False,
-        "traj_cls_shape": None,
-        "traj_cls_dtype": None,
-        "mlp1_inputs_requires_grad_before_add": bool(mlp1_inputs.requires_grad),
-        "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
-    })
     dual_traj_tokens = None
     dual_object_mask = None
     if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
@@ -293,16 +281,11 @@ def _extract_feature_with_qformer(self, pixel_values):
             mlp1_inputs.retain_grad()
         debug_tensors["traj_cls"] = traj_cls
         debug_tensors["mlp1_inputs_after_add"] = mlp1_inputs
-        trajectory_debug.update(
-            {
-                "traj_path_active": True,
-                "traj_source": "dual_cls_head",
-                "traj_cls_requires_grad": bool(traj_cls.requires_grad),
-                "traj_cls_shape": list(traj_cls.shape),
-                "traj_cls_dtype": str(traj_cls.dtype),
-                "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
-            }
-        )
+        traj_path_active = True
+        traj_source = "dual_cls_head"
+        traj_cls_requires_grad = bool(traj_cls.requires_grad)
+        traj_cls_shape = list(traj_cls.shape)
+        traj_cls_dtype = str(traj_cls.dtype)
     elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
         traj_cls = build_trajectory_features(
             self,
@@ -316,16 +299,29 @@ def _extract_feature_with_qformer(self, pixel_values):
             mlp1_inputs.retain_grad()
         debug_tensors["traj_cls"] = traj_cls
         debug_tensors["mlp1_inputs_after_add"] = mlp1_inputs
-        trajectory_debug.update(
-            {
-                "traj_path_active": True,
-                "traj_source": "cls_add",
-                "traj_cls_requires_grad": bool(traj_cls.requires_grad),
-                "traj_cls_shape": list(traj_cls.shape),
-                "traj_cls_dtype": str(traj_cls.dtype),
-                "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
-            }
-        )
+        traj_path_active = True
+        traj_source = "cls_add"
+        traj_cls_requires_grad = bool(traj_cls.requires_grad)
+        traj_cls_shape = list(traj_cls.shape)
+        traj_cls_dtype = str(traj_cls.dtype)
+    else:
+        traj_path_active = False
+        traj_source = None
+        traj_cls_requires_grad = False
+        traj_cls_shape = None
+        traj_cls_dtype = None
+    existing_trajectory_debug = getattr(self, "_last_trajectory_debug", None)
+    trajectory_debug = dict(existing_trajectory_debug or {})
+    trajectory_debug.update({
+        "fusion_mode": getattr(self, "trajectory_fusion_mode", None),
+        "traj_path_active": traj_path_active,
+        "traj_source": traj_source,
+        "traj_cls_requires_grad": traj_cls_requires_grad,
+        "traj_cls_shape": traj_cls_shape,
+        "traj_cls_dtype": traj_cls_dtype,
+        "mlp1_inputs_requires_grad_before_add": bool(mlp1_inputs_before_add.requires_grad) if (mlp1_inputs_before_add := debug_tensors["mlp1_inputs_before_add"]) is not None else False,
+        "mlp1_inputs_requires_grad_after_add": bool(mlp1_inputs.requires_grad),
+    })
     self._last_trajectory_debug = trajectory_debug
     existing_debug_tensors = getattr(self, "_last_trajectory_debug_tensors", {}) or {}
     existing_debug_tensors.update(debug_tensors)
