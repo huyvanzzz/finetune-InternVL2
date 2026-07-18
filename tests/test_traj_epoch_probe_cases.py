@@ -64,7 +64,11 @@ def test_label_smoothed_loss_matches_cross_entropy_when_smoothing_zero():
     logits = torch.tensor([[[3.0, 0.5, -1.0], [0.1, 0.2, 1.7]]], dtype=torch.float32)
     labels = torch.tensor([[0, 2]], dtype=torch.long)
 
-    ce = torch.nn.functional.cross_entropy(logits.view(-1, 3), labels.view(-1), ignore_index=-100)
+    ce = torch.nn.functional.cross_entropy(
+        logits[..., :-1, :].contiguous().view(-1, logits.shape[-1]),
+        labels[..., 1:].contiguous().view(-1),
+        ignore_index=-100,
+    )
     smoothed = train.compute_sequence_loss(
         logits=logits,
         labels=labels,
@@ -73,6 +77,29 @@ def test_label_smoothed_loss_matches_cross_entropy_when_smoothing_zero():
     )
 
     assert torch.allclose(smoothed, ce, atol=1e-6)
+
+
+def test_cross_entropy_loss_uses_causal_shift_like_model_forward():
+    train = _load_train_module()
+    logits = torch.tensor(
+        [[[4.0, 0.1, -2.0], [0.2, 3.5, -1.0], [0.1, -0.3, 2.8]]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([[-100, 1, 2]], dtype=torch.long)
+
+    expected = torch.nn.functional.cross_entropy(
+        logits[..., :-1, :].contiguous().view(-1, logits.shape[-1]),
+        labels[..., 1:].contiguous().view(-1),
+        ignore_index=-100,
+    )
+    actual = train.compute_sequence_loss(
+        logits=logits,
+        labels=labels,
+        loss_mode="cross_entropy",
+        label_smoothing=0.0,
+    )
+
+    assert torch.allclose(actual, expected, atol=1e-6)
 
 
 def test_label_smoothed_loss_is_finite_and_differs_from_ce_for_positive_smoothing():
