@@ -129,6 +129,55 @@ def test_forward_pretrain_batch_runs_and_clears_runtime_state():
     assert len(model.trajectory_calls) == 1
 
 
+def test_forward_pretrain_batch_sets_aux_inputs_on_inner_runtime_model():
+    inner = _DummyModel()
+
+    class _WrappedModel:
+        def __init__(self, module):
+            self.module = module
+            self.qformer_enabled = True
+            self.trajectory_enabled = True
+            self.wrapper_qformer_calls = 0
+            self.wrapper_trajectory_calls = 0
+
+        def set_qformer_text(self, ids, mask):
+            self.wrapper_qformer_calls += 1
+
+        def clear_qformer_text(self):
+            return None
+
+        def set_trajectory_inputs(self, label_ids, direction_ids, numeric_feats, object_mask):
+            self.wrapper_trajectory_calls += 1
+
+        def clear_trajectory_inputs(self):
+            return None
+
+        def __call__(self, *args, **kwargs):
+            return self.module(*args, **kwargs)
+
+    wrapped = _WrappedModel(inner)
+    batch = (
+        torch.ones(1, 4, dtype=torch.long),
+        torch.ones(1, 4, dtype=torch.long),
+        torch.ones(1, 4, dtype=torch.long),
+        torch.zeros(1, 3, 4, 4),
+        (torch.ones(1, 5, dtype=torch.long), torch.ones(1, 5, dtype=torch.long)),
+        (
+            torch.ones(1, 6, dtype=torch.long),
+            torch.ones(1, 6, dtype=torch.long),
+            torch.ones(1, 6, 6, dtype=torch.float32),
+            torch.ones(1, 6, dtype=torch.long),
+        ),
+        [],
+    )
+
+    loss = forward_pretrain_batch(wrapped, batch, device=torch.device("cpu"))
+
+    assert torch.isfinite(loss)
+    assert len(inner.trajectory_calls) == 1
+    assert wrapped.wrapper_trajectory_calls == 0
+
+
 def test_pretrain_collater_logs_total_input_tokens(monkeypatch):
     model = _DummyModel()
     tokenizer = _DummyTokenizer()
