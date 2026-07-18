@@ -268,6 +268,26 @@ def log_trainable_parameter_summary(model, logger, include_names: bool = False):
     logger.info("Trainable parameter summary | %s | names_logged=False", total_row)
 
 
+def log_trajectory_dropout_summary(model, config: Dict, logger):
+    traj_dropout = float(config.get("trajectory", {}).get("dropout", 0.0))
+    module_names = ["trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"]
+    summaries = []
+    for module_name in module_names:
+        module = getattr(model, module_name, None)
+        if module is None:
+            summaries.append(f"{module_name}=missing")
+            continue
+        dropouts = [m.p for m in module.modules() if isinstance(m, torch.nn.Dropout)]
+        summaries.append(
+            f"{module_name}:dropout_modules={len(dropouts)},p={dropouts},training={module.training}"
+        )
+    logger.info(
+        "Trajectory dropout config | trajectory.dropout=%.4f | %s",
+        traj_dropout,
+        " | ".join(summaries),
+    )
+
+
 def verify_flash_attention_runtime(model) -> Dict:
     modules = []
     for name, module in model.named_modules():
@@ -852,6 +872,7 @@ def build_model_and_tokenizer(config: Dict, logger):
         _active_trajectory_heads(model)["trajectory_cls_head"],
         _active_trajectory_heads(model)["trajectory_token_projector"],
     )
+    log_trajectory_dropout_summary(model, config, logger)
     model.train()
     return model, tokenizer
 
