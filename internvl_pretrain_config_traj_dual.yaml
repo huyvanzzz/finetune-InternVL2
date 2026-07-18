@@ -86,8 +86,8 @@ training:
   gradient_accumulation_steps: 1
   use_accelerate: true
   learning_rate: 1e-5
-  trajectory_learning_rate: 1e-4
-  bridge_learning_rate: 3e-5
+  trajectory_learning_rate: 3e-4
+  bridge_learning_rate: 5e-5
   warmup_ratio: 0.1
   warmup_min_steps: 20
   warmup_max_steps: 100
