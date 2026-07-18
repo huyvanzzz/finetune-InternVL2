@@ -74,13 +74,14 @@ Thu tu dung la:
 ```bash
 pip install --upgrade pip setuptools wheel
 pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu126 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
-pip install --no-cache-dir -r requirements.txt
+pip install --no-cache-dir --no-deps -r requirements.txt
 MAX_JOBS=4 pip install --no-build-isolation --no-cache-dir flash-attn==2.6.3
 ```
 
 Ly do:
 
 - `requirements.txt` chi giu dependency Python thong thuong.
+- `requirements.txt` duoc cai bang `--no-deps` de khong cho pip resolver tu y doi bo `torch` da cai truoc do.
 - `flash-attn` can `torch` co san truoc khi build.
 - Cai `flash-attn` bang `--no-build-isolation` de tranh loi `No module named 'torch'`.
 
@@ -88,6 +89,7 @@ Ly do:
 
 ```bash
 python -c "import torch; print(torch.__version__)"
+python -c "import torchvision, torchaudio; print(torchvision.__version__, torchaudio.__version__)"
 python -c "import transformers; print(transformers.__version__)"
 python -c "import accelerate; print(accelerate.__version__)"
 python -c "import bitsandbytes as bnb; print(bnb.__version__)"
