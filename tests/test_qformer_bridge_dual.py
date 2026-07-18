@@ -49,6 +49,9 @@ class _DummyModel(torch.nn.Module):
         self.qformer_query_tokens = torch.nn.Parameter(torch.zeros(1, 32, hidden_size))
         self._qformer_input_ids = torch.zeros(1, 1, dtype=torch.long)
         self._qformer_attention_mask = torch.ones(1, 1, dtype=torch.long)
+        self.language_model = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(weight=torch.zeros(hidden_size, hidden_size, dtype=torch.bfloat16))
+        )
         self.config = SimpleNamespace(llm_config=SimpleNamespace(hidden_size=hidden_size))
         self.trajectory_cls_head = lambda traj_tokens, object_mask: torch.full((1, 1, hidden_size), 2.0)
         self.trajectory_token_projector = lambda traj_tokens: torch.full((1, 6, hidden_size), 3.0)
@@ -81,5 +84,27 @@ def test_extract_feature_with_dual_applies_add_and_concat(monkeypatch):
     visual_embeds = qformer_bridge._extract_feature_with_qformer(model, pixel_values)
 
     assert visual_embeds.shape == (1, 38, 4)
-    assert torch.allclose(visual_embeds[:, :32, :], torch.full((1, 32, 4), 3.0))
-    assert torch.allclose(visual_embeds[:, 32:, :], torch.full((1, 6, 4), 3.0))
+    assert visual_embeds.dtype == torch.bfloat16
+    assert torch.allclose(visual_embeds[:, :32, :].float(), torch.full((1, 32, 4), 3.0))
+    assert torch.allclose(visual_embeds[:, 32:, :].float(), torch.full((1, 6, 4), 3.0))
+
+
+def test_extract_feature_with_qformer_matches_llm_embedding_dtype(monkeypatch):
+    model = _DummyModel("cls_add")
+
+    monkeypatch.setattr(
+        qformer_bridge,
+        "_extract_vit_tokens",
+        lambda self, pixel_values: torch.ones(pixel_values.shape[0], 32, 4, dtype=torch.float32, device=pixel_values.device),
+    )
+    monkeypatch.setattr(qformer_bridge, "_ensure_bridge_device", lambda self, reference: None)
+    monkeypatch.setattr(
+        qformer_bridge,
+        "build_trajectory_features",
+        lambda model, batch_size, device: torch.zeros(batch_size, 1, 4, device=device, dtype=torch.float32),
+    )
+
+    pixel_values = torch.ones(1, 3, 448, 448, dtype=torch.float32)
+    visual_embeds = qformer_bridge._extract_feature_with_qformer(model, pixel_values)
+
+    assert visual_embeds.dtype == torch.bfloat16
