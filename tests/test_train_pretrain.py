@@ -17,6 +17,7 @@ from train_pretrain import (
     get_cuda_memory_stats,
     infer_resume_position,
     inspect_optimizer_param_groups,
+    log_trajectory_path_gradients,
     log_runtime_batch_debug,
     reduce_token_weighted_loss,
     resolve_warmup_steps,
@@ -195,6 +196,26 @@ def test_log_runtime_batch_debug_includes_trajectory_path_debug(monkeypatch):
     log_runtime_batch_debug(batch, model, torch.device("cpu"), _FakeLogger(), global_step=1, phase="pre_forward")
 
     assert any("Trajectory path debug" in message for message in messages)
+
+
+def test_log_trajectory_path_gradients_reports_tensor_gradients():
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    model = _DummyModel()
+    source = torch.tensor([[1.0, -2.0]], requires_grad=True)
+    loss = (source ** 2).sum()
+    loss.backward()
+    model._last_trajectory_debug = {"fusion_mode": "cls_add"}
+    model._last_trajectory_debug_tensors = {"traj_cls": source}
+
+    log_trajectory_path_gradients(model, _FakeLogger())
+
+    assert any("Trajectory grad path" in message for message in messages)
+    assert any("grad_norm" in message for message in messages)
 
 
 def test_resolve_warmup_steps_prefers_ratio_policy():
