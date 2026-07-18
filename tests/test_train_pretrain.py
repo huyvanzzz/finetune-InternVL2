@@ -1,5 +1,6 @@
 import json
 import logging
+from io import StringIO
 from types import SimpleNamespace
 
 import torch
@@ -19,6 +20,7 @@ from train_pretrain import (
     get_cuda_memory_stats,
     infer_resume_position,
     inspect_optimizer_param_groups,
+    _DynamicVitDebugFilter,
     log_trainable_parameter_summary,
     log_trajectory_path_gradients,
     log_runtime_batch_debug,
@@ -560,6 +562,16 @@ def test_suppress_loaded_model_debug_logs_sets_model_module_to_warning():
 
     assert logging.getLogger(logger_name).level == logging.WARNING
     assert any("InternVL model code path" in message for message in messages)
+
+
+def test_dynamic_vit_debug_filter_removes_only_forbidden_suffix():
+    stream = StringIO()
+    filtered = _DynamicVitDebugFilter(stream)
+
+    filtered.write("Pretrain epoch 1 loss=3.0]dynamic ViT batch size: 72, images per sample: 3.0")
+    filtered.write("\nnext line")
+
+    assert stream.getvalue() == "Pretrain epoch 1 loss=3.0]\nnext line"
 
 
 def test_early_stopping_state_tracks_best_and_stops_after_patience():

@@ -10,6 +10,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import time
 import warnings
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 EARLY_STOPPING_STATE_FILENAME = "early_stopping_state.json"
+FORBIDDEN_DYNAMIC_VIT_DEBUG_TEXT = "dynamic ViT batch size"
 
 
 def configure_quiet_training_warnings():
@@ -73,6 +75,39 @@ def configure_quiet_training_warnings():
         message=r".*None of the inputs have requires_grad=True\. Gradients will be None.*",
         category=UserWarning,
     )
+
+
+class _DynamicVitDebugFilter:
+    def __init__(self, stream, forbidden_text: str = FORBIDDEN_DYNAMIC_VIT_DEBUG_TEXT):
+        self.stream = stream
+        self.forbidden_text = forbidden_text
+
+    def write(self, text):
+        if self.forbidden_text in text:
+            text = text[: text.find(self.forbidden_text)]
+        if text:
+            return self.stream.write(text)
+        return 0
+
+    def flush(self):
+        return self.stream.flush()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+    @property
+    def encoding(self):
+        return getattr(self.stream, "encoding", None)
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def install_quiet_training_output_filter():
+    if not isinstance(sys.stdout, _DynamicVitDebugFilter):
+        sys.stdout = _DynamicVitDebugFilter(sys.stdout)
+    if not isinstance(sys.stderr, _DynamicVitDebugFilter):
+        sys.stderr = _DynamicVitDebugFilter(sys.stderr)
 
 
 def suppress_loaded_model_debug_logs(model, logger):
@@ -1442,6 +1477,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
 
 def main():
     configure_quiet_training_warnings()
+    install_quiet_training_output_filter()
     set_seed(42)
     args = parse_args()
     config = load_config(args.config)
