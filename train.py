@@ -75,6 +75,7 @@ from trajectory_branch import (
     save_trajectory_branch,
     trajectory_enabled,
 )
+from trajectory_trainability import apply_mode_gated_trajectory_trainability
 
 
 IMG_START_TOKEN = "<img>"
@@ -219,7 +220,6 @@ def log_pretrain_checkpoint_verification(model, checkpoint_dir, logger):
                 item["checkpoint_norm"],
             )
     return verification
-
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -707,6 +707,8 @@ if __name__ == "__main__":
                 load_trajectory_branch(model, pretrain_checkpoint_dir, strict=True)
                 align_qformer_bridge_runtime(model)
             log_pretrain_checkpoint_verification(model, pretrain_checkpoint_dir, logger)
+
+    apply_mode_gated_trajectory_trainability(model, logger)
 
     model.language_model.print_trainable_parameters()
     model.train()
