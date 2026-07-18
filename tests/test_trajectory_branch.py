@@ -14,6 +14,7 @@ from trajectory_branch import (
     TrajectoryConcatHead,
     TrajectorySource,
     attach_trajectory_branch,
+    build_trajectory_tokens_base,
     load_trajectory_branch,
     resolve_trajectory_source_path,
     save_trajectory_branch,
@@ -222,6 +223,28 @@ def test_trajectory_backbone_records_stage_debug_when_enabled():
     assert "numeric_embeds_abs_mean" in debug
     assert "tokens_before_mask_abs_mean" in debug
     assert "tokens_after_encoder_abs_mean" in debug
+
+
+def test_build_trajectory_tokens_base_propagates_model_debug_flag():
+    class _DebugModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._enable_trajectory_grad_debug = True
+            self.trajectory_backbone = TrajectoryBackbone(vocab_size=8, direction_vocab_size=6)
+
+        def get_trajectory_inputs(self, batch_size, device):
+            return (
+                torch.tensor([[1, 2, 0, 0, 0, 0]], dtype=torch.long, device=device),
+                torch.tensor([[1, 2, 0, 0, 0, 0]], dtype=torch.long, device=device),
+                torch.randn(1, 6, 6, device=device),
+                torch.tensor([[1, 1, 0, 0, 0, 0]], dtype=torch.long, device=device),
+            )
+
+    model = _DebugModel()
+
+    build_trajectory_tokens_base(model, batch_size=1, device=torch.device("cpu"))
+
+    assert model.trajectory_backbone._last_stage_debug is not None
 
 
 class _TinyTrajectoryModel(torch.nn.Module):
