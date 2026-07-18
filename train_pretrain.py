@@ -84,7 +84,7 @@ class _DynamicVitDebugFilter:
 
     def write(self, text):
         if self.forbidden_text in text:
-            text = text[: text.find(self.forbidden_text)]
+            return 0
         if text:
             return self.stream.write(text)
         return 0

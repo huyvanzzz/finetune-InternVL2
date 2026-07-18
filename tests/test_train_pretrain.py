@@ -564,14 +564,14 @@ def test_suppress_loaded_model_debug_logs_sets_model_module_to_warning():
     assert any("InternVL model code path" in message for message in messages)
 
 
-def test_dynamic_vit_debug_filter_removes_only_forbidden_suffix():
+def test_dynamic_vit_debug_filter_drops_entire_forbidden_write():
     stream = StringIO()
     filtered = _DynamicVitDebugFilter(stream)
 
     filtered.write("Pretrain epoch 1 loss=3.0]dynamic ViT batch size: 72, images per sample: 3.0")
     filtered.write("\nnext line")
 
-    assert stream.getvalue() == "Pretrain epoch 1 loss=3.0]\nnext line"
+    assert stream.getvalue() == "\nnext line"
 
 
 def test_early_stopping_state_tracks_best_and_stops_after_patience():
