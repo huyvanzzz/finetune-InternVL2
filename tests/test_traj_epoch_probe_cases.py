@@ -169,6 +169,39 @@ def test_optimizer_groups_split_lora_bridge_and_trajectory_with_distinct_lrs():
 
 
 @pytest.mark.parametrize(
+    ("mode", "expected_trainable", "expected_frozen"),
+    [
+        ("cls_add", {"trajectory_backbone", "trajectory_cls_head"}, {"trajectory_token_projector"}),
+        ("concat", {"trajectory_backbone", "trajectory_token_projector"}, {"trajectory_cls_head"}),
+        ("dual", {"trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"}, set()),
+    ],
+)
+def test_mode_gated_trajectory_trainability_controls_optimizer_membership(mode, expected_trainable, expected_frozen):
+    train = _load_train_module()
+    model = _TinyTrainableModel()
+    model.trajectory_enabled = True
+    model.trajectory_fusion_mode = mode
+
+    train.apply_mode_gated_trajectory_trainability(model)
+    grouped = train.build_optimizer_param_groups(
+        model,
+        lora_lr=5e-5,
+        bridge_lr=5e-4,
+        trajectory_lr=5e-4,
+    )
+
+    trajectory_param_ids = {id(param) for param in grouped[0]["params"]}
+    for module_name in expected_trainable:
+        module_params = list(getattr(model, module_name).parameters())
+        assert all(param.requires_grad for param in module_params)
+        assert any(id(param) in trajectory_param_ids for param in module_params)
+    for module_name in expected_frozen:
+        module_params = list(getattr(model, module_name).parameters())
+        assert all(not param.requires_grad for param in module_params)
+        assert all(id(param) not in trajectory_param_ids for param in module_params)
+
+
+@pytest.mark.parametrize(
     ("config_name", "mode"),
     [
         ("internvl_config_traj_cls.yaml", "cls_add"),

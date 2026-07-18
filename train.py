@@ -198,6 +198,42 @@ def count_named_parameters(model, prefixes):
     )
 
 
+def apply_mode_gated_trajectory_trainability(model):
+    if not getattr(model, "trajectory_enabled", False):
+        return {}
+
+    mode = getattr(model, "trajectory_fusion_mode", None)
+    policy = {
+        "cls_add": {
+            "trajectory_backbone": True,
+            "trajectory_cls_head": True,
+            "trajectory_token_projector": False,
+        },
+        "concat": {
+            "trajectory_backbone": True,
+            "trajectory_cls_head": False,
+            "trajectory_token_projector": True,
+        },
+        "dual": {
+            "trajectory_backbone": True,
+            "trajectory_cls_head": True,
+            "trajectory_token_projector": True,
+        },
+    }
+    if mode not in policy:
+        raise ValueError(f"Unsupported trajectory fusion mode for trainability policy: {mode}")
+
+    applied = {}
+    for module_name, trainable in policy[mode].items():
+        module = getattr(model, module_name, None)
+        if module is None:
+            applied[module_name] = None
+            continue
+        module.requires_grad_(trainable)
+        applied[module_name] = trainable
+    return applied
+
+
 def compute_sequence_loss(logits, labels, loss_mode: str, label_smoothing: float):
     shifted_logits = logits[..., :-1, :].contiguous()
     shifted_labels = labels[..., 1:].contiguous().to(shifted_logits.device)
@@ -707,10 +743,18 @@ if __name__ == "__main__":
                 model,
                 ("trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"),
             )
+            trajectory_trainability = apply_mode_gated_trajectory_trainability(model)
             logger.info(
                 "Trajectory params attached | mode=%s | total_branch_params=%s",
                 getattr(model, "trajectory_fusion_mode", "disabled"),
                 f"{trajectory_total:,}",
+            )
+            logger.info(
+                "Mode-gated trajectory trainability | mode=%s | backbone=%s | cls_head=%s | token_projector=%s",
+                getattr(model, "trajectory_fusion_mode", "disabled"),
+                trajectory_trainability.get("trajectory_backbone"),
+                trajectory_trainability.get("trajectory_cls_head"),
+                trajectory_trainability.get("trajectory_token_projector"),
             )
 
     logger.info("Applying LoRA...")
