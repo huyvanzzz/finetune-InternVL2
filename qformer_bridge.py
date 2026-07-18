@@ -261,6 +261,10 @@ def _extract_feature_with_qformer(self, pixel_values):
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
     mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    debug_tensors = {}
+    if getattr(self, "_enable_trajectory_grad_debug", False) and mlp1_inputs.requires_grad:
+        mlp1_inputs.retain_grad()
+    debug_tensors["mlp1_inputs_before_add"] = mlp1_inputs
     trajectory_debug = {
         "fusion_mode": getattr(self, "trajectory_fusion_mode", None),
         "traj_path_active": False,
@@ -280,7 +284,13 @@ def _extract_feature_with_qformer(self, pixel_values):
             device=mlp1_inputs.device,
         )
         traj_cls = self.trajectory_cls_head(dual_traj_tokens, dual_object_mask).to(mlp1_inputs.dtype)
+        if getattr(self, "_enable_trajectory_grad_debug", False) and traj_cls.requires_grad:
+            traj_cls.retain_grad()
         mlp1_inputs = mlp1_inputs + traj_cls
+        if getattr(self, "_enable_trajectory_grad_debug", False) and mlp1_inputs.requires_grad:
+            mlp1_inputs.retain_grad()
+        debug_tensors["traj_cls"] = traj_cls
+        debug_tensors["mlp1_inputs_after_add"] = mlp1_inputs
         trajectory_debug.update(
             {
                 "traj_path_active": True,
@@ -297,7 +307,13 @@ def _extract_feature_with_qformer(self, pixel_values):
             batch_size=mlp1_inputs.shape[0],
             device=mlp1_inputs.device,
         ).to(mlp1_inputs.dtype)
+        if getattr(self, "_enable_trajectory_grad_debug", False) and traj_cls.requires_grad:
+            traj_cls.retain_grad()
         mlp1_inputs = mlp1_inputs + traj_cls
+        if getattr(self, "_enable_trajectory_grad_debug", False) and mlp1_inputs.requires_grad:
+            mlp1_inputs.retain_grad()
+        debug_tensors["traj_cls"] = traj_cls
+        debug_tensors["mlp1_inputs_after_add"] = mlp1_inputs
         trajectory_debug.update(
             {
                 "traj_path_active": True,
@@ -309,6 +325,9 @@ def _extract_feature_with_qformer(self, pixel_values):
             }
         )
     self._last_trajectory_debug = trajectory_debug
+    existing_debug_tensors = getattr(self, "_last_trajectory_debug_tensors", {}) or {}
+    existing_debug_tensors.update(debug_tensors)
+    self._last_trajectory_debug_tensors = existing_debug_tensors
     mlp1_dtype = next(self.mlp1.parameters()).dtype
     mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
     visual_tokens = self.mlp1(mlp1_inputs)
