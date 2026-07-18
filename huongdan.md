@@ -14,7 +14,7 @@
 Neu da co SSH key tren may local:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 38354 root@220.130.209.122
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p <PORT> root@<HOST>
 ```
 
 Vi du:
@@ -37,10 +37,12 @@ Kiem tra nhanh:
 
 ```bash
 nvidia-smi
+nvcc --version
 python --version
 python - <<'PY'
 import torch
 print(torch.__version__)
+print("torch cuda =", torch.version.cuda)
 print(torch.cuda.is_available())
 print(torch.cuda.device_count())
 if torch.cuda.device_count() >= 2:
@@ -69,11 +71,21 @@ git pull origin feature/pretrain-server-setup
 ## 5. Cai moi truong dung thu tu
 
 Khong cai `flash-attn` chung trong `requirements.txt`.
+Neu truoc do da cai sai moi truong, don sach truoc:
+
+```bash
+pip uninstall -y flash-attn
+pip uninstall -y torch torchvision torchaudio triton bitsandbytes accelerate transformers peft huggingface-hub tokenizers datasets evaluate timm scikit-learn scipy nltk rouge-score sentencepiece safetensors pandas numpy pyarrow
+pip uninstall -y -r requirements.txt
+pip cache purge
+```
+
 Thu tu dung la:
 
 ```bash
-pip install --upgrade pip setuptools wheel
-pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
+pip install --upgrade pip wheel
+pip install --no-cache-dir "setuptools<82"
+python -c "import torch; print(torch.__version__, torch.version.cuda)"
 pip install --no-cache-dir --no-deps -r requirements.txt
 MAX_JOBS=4 pip install --no-build-isolation --no-cache-dir flash-attn==2.6.3
 ```
@@ -84,14 +96,25 @@ Ly do:
 - `requirements.txt` duoc cai bang `--no-deps` de khong cho pip resolver tu y doi bo `torch` da cai truoc do.
 - `flash-attn` can `torch` co san truoc khi build.
 - Muc tieu chay nhanh nhat voi `flash-attn` tren branch nay la dung CUDA toolkit `12.8` va bo `torch` `cu128`.
+- Neu instance moi da co san `torch` va `torch.version.cuda` khop `nvcc`, uu tien giu nguyen bo do, khong cai de.
+- Khong nang `setuptools` len `82+` vi `torch 2.11.0+cu128` yeu cau `setuptools < 82`.
 - Cai `flash-attn` bang `--no-build-isolation` de tranh loi `No module named 'torch'`.
+
+Neu instance chua co `torch` dung ban CUDA, moi cai them nhu sau:
+
+```bash
+pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+pip install --no-cache-dir "setuptools<82"
+```
 
 ## 6. Verify moi truong
 
 ```bash
+nvcc --version
 python -c "import torch; print(torch.__version__)"
 python -c "import torchvision, torchaudio; print(torchvision.__version__, torchaudio.__version__)"
 python -c "import torch; print('torch cuda =', torch.version.cuda)"
+python -c "import setuptools; print(setuptools.__version__)"
 python -c "import transformers; print(transformers.__version__)"
 python -c "import accelerate; print(accelerate.__version__)"
 python -c "import bitsandbytes as bnb; print(bnb.__version__)"
