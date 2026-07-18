@@ -1133,6 +1133,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                 logger.info("Restored global_optimizer_step=%s", global_optimizer_step)
     profile_steps = int(config["training"].get("profile_steps", 0))
     gradient_debug_steps = int(config["training"].get("gradient_debug_steps", 1))
+    gradient_health_steps = int(config["training"].get("gradient_health_steps", gradient_debug_steps))
     batch_debug_steps = int(config["training"].get("batch_debug_steps", 0))
     memory_debug_steps = int(config["training"].get("memory_debug_steps", batch_debug_steps))
 
@@ -1186,6 +1187,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                         accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
                         if is_main_process and global_optimizer_step < gradient_debug_steps:
                             log_trajectory_path_gradients(unwrapped_model, logger)
+                        if is_main_process and global_optimizer_step < gradient_health_steps:
                             log_gradient_health(unwrapped_model, logger)
                         optimizer.step()
                         lr_scheduler.step()
@@ -1229,6 +1231,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     if global_optimizer_step < gradient_debug_steps:
                         log_trajectory_path_gradients(model, logger)
+                    if global_optimizer_step < gradient_health_steps:
                         log_gradient_health(model, logger)
                     optimizer.step()
                     lr_scheduler.step()

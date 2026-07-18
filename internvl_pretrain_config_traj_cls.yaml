@@ -104,10 +104,11 @@ training:
   logging_steps: 10
   log_token_stats: true
   token_log_batches: 2
-  profile_steps: 12
+  profile_steps: 0
   gradient_debug_steps: 12
-  batch_debug_steps: 12
-  memory_debug_steps: 12
+  gradient_health_steps: 0
+  batch_debug_steps: 0
+  memory_debug_steps: 0
 
 hardware:
   device: "cuda"
