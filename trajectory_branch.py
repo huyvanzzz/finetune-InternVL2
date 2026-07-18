@@ -492,6 +492,9 @@ def _update_trajectory_build_debug(model, **kwargs):
 
 def build_trajectory_tokens_base(model, batch_size: int, device: torch.device):
     label_ids, direction_ids, numeric_feats, object_mask = model.get_trajectory_inputs(batch_size, device)
+    model.trajectory_backbone._enable_trajectory_grad_debug = bool(
+        getattr(model, "_enable_trajectory_grad_debug", False)
+    )
     traj_tokens_base = model.trajectory_backbone(
         label_ids=label_ids,
         direction_ids=direction_ids,
