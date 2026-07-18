@@ -7,6 +7,7 @@ import torch
 from pretrain_checkpoint_verify import verify_loaded_pretrain_modules
 from qformer_bridge import BRIDGE_CONFIG_NAME, save_qformer_bridge
 from trajectory_branch import TRAJECTORY_BRANCH_CONFIG_NAME, save_trajectory_branch
+from trajectory_trainability import apply_mode_gated_trajectory_trainability
 
 
 class _TinyBridge(torch.nn.Module):
@@ -123,6 +124,48 @@ class _TinyCombined(torch.nn.Module):
         self.trajectory_backbone = torch.nn.Linear(4, 4)
         self.trajectory_cls_head = torch.nn.Linear(4, 4)
         self.trajectory_token_projector = torch.nn.Linear(4, 4)
+
+
+def _projector_param_names(model):
+    proj_param_names = {
+        "qformer_input_proj",
+        "qformer_to_mlp1_proj",
+        "trajectory_backbone",
+        "trajectory_cls_head",
+        "trajectory_token_projector",
+    }
+    return [
+        name
+        for name, param in model.named_parameters()
+        if param.requires_grad and any(group_name in name for group_name in proj_param_names)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fusion_mode", "expected_present", "expected_absent"),
+    [
+        ("cls_add", ["trajectory_backbone", "trajectory_cls_head"], ["trajectory_token_projector"]),
+        ("concat", ["trajectory_backbone", "trajectory_token_projector"], ["trajectory_cls_head"]),
+        ("dual", ["trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"], []),
+    ],
+)
+def test_mode_gated_trajectory_trainability_controls_optimizer_membership(
+    fusion_mode,
+    expected_present,
+    expected_absent,
+):
+    model = _TinyCombined()
+    model.trajectory_fusion_mode = fusion_mode
+
+    states = apply_mode_gated_trajectory_trainability(model)
+    optimizer_like_names = _projector_param_names(model)
+
+    for module_name in expected_present:
+        assert states[module_name] is True
+        assert any(module_name in name for name in optimizer_like_names)
+    for module_name in expected_absent:
+        assert states[module_name] is False
+        assert not any(module_name in name for name in optimizer_like_names)
 
 
 def test_verify_loaded_pretrain_modules_detects_exact_tensor_match(tmp_path):
