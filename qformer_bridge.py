@@ -292,6 +292,8 @@ def _extract_feature_with_qformer(self, pixel_values):
         traj_tokens = self.trajectory_token_projector(dual_traj_tokens)
         traj_tokens = traj_tokens * dual_object_mask.to(traj_tokens.dtype).unsqueeze(-1)
         visual_tokens = torch.cat([visual_tokens, traj_tokens.to(visual_tokens.dtype)], dim=1)
+    llm_embed_dtype = self.language_model.get_input_embeddings().weight.dtype
+    visual_tokens = visual_tokens.to(dtype=llm_embed_dtype)
     return visual_tokens
 
 
