@@ -15,6 +15,7 @@ from typing import Dict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
 from huggingface_hub import snapshot_download
@@ -172,6 +173,18 @@ def log_optimizer_param_group_health(model, optimizer, logger):
     if report["duplicate_param_names"]:
         logger.warning("Optimizer duplicate trainable params: %s", report["duplicate_param_names"][:20])
     return report
+
+
+def log_trainable_parameter_summary(model, logger, include_names: bool = False):
+    rows = trainable_parameter_summary(model)
+    total_row = rows[-1] if rows else "TOTAL_TRAINABLE: 0"
+    if include_names:
+        logger.info("Trainable parameter summary:")
+        for row in rows:
+            logger.info(row)
+        return
+
+    logger.info("Trainable parameter summary | %s | names_logged=False", total_row)
 
 
 def verify_flash_attention_runtime(model) -> Dict:
@@ -512,6 +525,28 @@ def _runtime_model_for_aux_inputs(model):
     return getattr(model, "module", model)
 
 
+def compute_generation_loss(outputs, labels: torch.Tensor, loss_mode: str = "cross_entropy", label_smoothing: float = 0.0):
+    loss_mode = str(loss_mode or "cross_entropy")
+    label_smoothing = float(label_smoothing or 0.0)
+    if loss_mode == "cross_entropy" or label_smoothing <= 0.0:
+        if getattr(outputs, "loss", None) is None:
+            raise ValueError("Model output does not include loss for cross_entropy mode.")
+        return outputs.loss
+    if loss_mode != "label_smoothing":
+        raise ValueError(f"Unsupported pretrain loss_mode: {loss_mode}")
+    logits = getattr(outputs, "logits", None)
+    if logits is None:
+        raise ValueError("Model output does not include logits required for label_smoothing mode.")
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    return F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        label_smoothing=label_smoothing,
+    )
+
+
 def forward_pretrain_batch(model, batch, device: torch.device):
     input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
     input_ids_batch = input_ids_batch.to(device)
@@ -522,6 +557,9 @@ def forward_pretrain_batch(model, batch, device: torch.device):
     ).to(device)
     image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long, device=device)
     runtime_model = _runtime_model_for_aux_inputs(model)
+    loss_mode = str(getattr(runtime_model, "pretrain_loss_mode", "cross_entropy"))
+    label_smoothing = float(getattr(runtime_model, "pretrain_label_smoothing", 0.0))
+    labels_for_model = None if loss_mode == "label_smoothing" and label_smoothing > 0.0 else label_ids_batch
 
     if getattr(runtime_model, "qformer_enabled", False) and qformer_inputs is not None:
         runtime_model.set_qformer_text(qformer_inputs[0].to(device), qformer_inputs[1].to(device))
@@ -537,7 +575,7 @@ def forward_pretrain_batch(model, batch, device: torch.device):
         outputs = model(
             input_ids=input_ids_batch,
             pixel_values=pixel_values_batch,
-            labels=label_ids_batch,
+            labels=labels_for_model,
             image_flags=image_flags_batch,
             return_dict=True,
         )
@@ -546,7 +584,7 @@ def forward_pretrain_batch(model, batch, device: torch.device):
             runtime_model.clear_qformer_text()
         if getattr(runtime_model, "trajectory_enabled", False):
             runtime_model.clear_trajectory_inputs()
-    return outputs.loss
+    return compute_generation_loss(outputs, label_ids_batch, loss_mode=loss_mode, label_smoothing=label_smoothing)
 
 
 def parse_args():
@@ -716,9 +754,16 @@ def build_model_and_tokenizer(config: Dict, logger):
     model.pretrain_data_source = config["pretrain"]["question_train_file"]
     model.question_format_version = "v1_qa_question_answer"
     model.pretrain_movement_enabled = bool(config["pretrain"]["movement_enabled"])
+    model.pretrain_loss_mode = str(config["training"].get("loss_mode", "cross_entropy"))
+    model.pretrain_label_smoothing = float(config["training"].get("label_smoothing", 0.0))
 
     model.language_model.requires_grad_(False)
     _freeze_modules_for_pretrain(model)
+    logger.info(
+        "Pretrain loss config | loss_mode=%s | label_smoothing=%.4f",
+        model.pretrain_loss_mode,
+        model.pretrain_label_smoothing,
+    )
     logger.info(
         "Mode-gated trajectory heads | mode=%s | cls_head_trainable=%s | token_projector_trainable=%s",
         getattr(model, "trajectory_fusion_mode", "unknown"),
@@ -1010,9 +1055,11 @@ def train_pretrain(model, tokenizer, train_loader, val_loader, config: Dict, out
         num_training_steps=total_training_steps,
     )
 
-    logger.info("Trainable parameter summary:")
-    for row in trainable_parameter_summary(model):
-        logger.info(row)
+    log_trainable_parameter_summary(
+        model,
+        logger,
+        include_names=bool(config["training"].get("log_trainable_parameter_names", False)),
+    )
     log_optimizer_param_group_health(model, optimizer, logger)
 
     return optimizer, lr_scheduler
