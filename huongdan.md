@@ -20,7 +20,7 @@ ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p <PORT> root@<HOST>
 Vi du:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 38213 root@220.130.209.122
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54105 root@210.64.18.177
 ```
 
 Neu lan dau ket noi, go `yes`.

@@ -142,6 +142,25 @@ def test_pretrain_collater_logs_total_input_tokens(monkeypatch):
     assert any("total_input_tokens" in message for message in messages)
 
 
+def test_pretrain_collater_skips_token_logging_when_logger_is_uninitialized(monkeypatch):
+    model = _DummyModel()
+    tokenizer = _DummyTokenizer()
+    collater = PretrainCollaterFn(tokenizer, model)
+    collater.log_token_stats = True
+    collater.token_log_remaining = 1
+
+    monkeypatch.setattr(
+        train_pretrain,
+        "get_logger",
+        lambda: (_ for _ in ()).throw(AssertionError("Logger is not initialized.")),
+    )
+
+    batch = collater([_make_sample("What is closest?")])
+
+    assert batch[0].shape[0] == 1
+    assert collater.token_log_remaining == 0
+
+
 def test_resolve_warmup_steps_prefers_ratio_policy():
     config = {
         "training": {

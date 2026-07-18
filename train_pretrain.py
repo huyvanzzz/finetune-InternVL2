@@ -269,6 +269,13 @@ class PretrainCollaterFn:
         self.log_token_stats = False
         self.token_log_remaining = 0
 
+    @staticmethod
+    def _safe_logger():
+        try:
+            return get_logger()
+        except AssertionError:
+            return SilentLogger()
+
     def __call__(self, batch):
         label_ids_batch = []
         input_ids_batch = []
@@ -308,7 +315,7 @@ class PretrainCollaterFn:
             if self.log_token_stats and self.token_log_remaining != 0:
                 total_image_tokens_in_sample = total_tiles * self.model.num_image_token
                 total_sequence_length = len(input_ids) + len(answer_ids) + 1
-                logger = get_logger()
+                logger = self._safe_logger()
                 logger.info(
                     "[INFO] Pretrain image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
                     len(pixel_values),
