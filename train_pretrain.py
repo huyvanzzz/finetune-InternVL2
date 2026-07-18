@@ -1262,6 +1262,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
     gradient_health_steps = int(config["training"].get("gradient_health_steps", gradient_debug_steps))
     batch_debug_steps = int(config["training"].get("batch_debug_steps", 0))
     memory_debug_steps = int(config["training"].get("memory_debug_steps", batch_debug_steps))
+    logging_steps = max(1, int(config["training"].get("logging_steps", 10)))
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -1288,17 +1289,9 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
         else:
             initial_step = 0
 
-        progress_bar = tqdm(
-            batch_iterator,
-            desc=f"Pretrain epoch {epoch + 1}/{epochs}",
-            total=len(train_loader),
-            initial=initial_step,
-            leave=False,
-            dynamic_ncols=True,
-            file=sys.__stderr__,
-            disable=not is_main_process,
-        )
-        for step, batch in enumerate(progress_bar, start=initial_step + 1):
+        epoch_start = time.perf_counter()
+        total_batches = len(train_loader)
+        for step, batch in enumerate(batch_iterator, start=initial_step + 1):
             step_start = time.perf_counter()
             if is_main_process and step <= batch_debug_steps:
                 log_runtime_batch_debug(batch, unwrapped_model, device, logger, global_step=step, phase="pre_forward")
@@ -1326,10 +1319,25 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                         global_steps_this_epoch += 1
                         avg_loss = accumulated_loss_for_log / accum_steps
                         if is_main_process:
-                            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
                             metrics["train_loss"].append(
                                 {"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)}
                             )
+                            if global_steps_this_epoch == 1 or global_steps_this_epoch % logging_steps == 0:
+                                elapsed = max(time.perf_counter() - epoch_start, 1e-6)
+                                batches_done = max(step - initial_step, 1)
+                                sec_per_batch = elapsed / batches_done
+                                eta_sec = sec_per_batch * max(total_batches - step, 0)
+                                logger.info(
+                                    "Pretrain epoch %s/%s | step %s/%s | opt_step=%s | loss=%.4f | sec/batch=%.2f | eta_min=%.1f",
+                                    epoch + 1,
+                                    epochs,
+                                    step,
+                                    total_batches,
+                                    global_optimizer_step,
+                                    avg_loss,
+                                    sec_per_batch,
+                                    eta_sec / 60.0,
+                                )
                             if global_optimizer_step <= profile_steps:
                                 if torch.cuda.is_available():
                                     torch.cuda.synchronize()
@@ -1353,7 +1361,6 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                 model._last_trajectory_debug = None
                 model._last_trajectory_debug_tensors = {}
                 loss = forward_pretrain_batch(model, batch, device=device)
-                progress_bar.set_postfix(loss=f"{loss.item():.4f}")
                 (loss / accum_steps).backward()
                 accumulated_loss_for_log += float(loss.item())
                 if step % accum_steps == 0:
@@ -1370,6 +1377,22 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                     global_steps_this_epoch += 1
                     avg_loss = accumulated_loss_for_log / accum_steps
                     metrics["train_loss"].append({"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)})
+                    if global_steps_this_epoch == 1 or global_steps_this_epoch % logging_steps == 0:
+                        elapsed = max(time.perf_counter() - epoch_start, 1e-6)
+                        batches_done = max(step - initial_step, 1)
+                        sec_per_batch = elapsed / batches_done
+                        eta_sec = sec_per_batch * max(total_batches - step, 0)
+                        logger.info(
+                            "Pretrain epoch %s/%s | step %s/%s | opt_step=%s | loss=%.4f | sec/batch=%.2f | eta_min=%.1f",
+                            epoch + 1,
+                            epochs,
+                            step,
+                            total_batches,
+                            global_optimizer_step,
+                            avg_loss,
+                            sec_per_batch,
+                            eta_sec / 60.0,
+                        )
                     if global_optimizer_step <= memory_debug_steps:
                         log_runtime_batch_debug(
                             batch,
