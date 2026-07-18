@@ -206,6 +206,24 @@ def test_trajectory_backbone_handles_all_empty_mask_without_nan():
     )
 
 
+def test_trajectory_backbone_records_stage_debug_when_enabled():
+    backbone = TrajectoryBackbone(vocab_size=8, direction_vocab_size=6)
+    backbone._enable_trajectory_grad_debug = True
+    label_ids = torch.tensor([[1, 2, 0, 0, 0, 0]], dtype=torch.long)
+    direction_ids = torch.tensor([[1, 2, 0, 0, 0, 0]], dtype=torch.long)
+    numeric_feats = torch.randn(1, 6, 6)
+    object_mask = torch.tensor([[1, 1, 0, 0, 0, 0]], dtype=torch.long)
+
+    _ = backbone(label_ids=label_ids, direction_ids=direction_ids, numeric_feats=numeric_feats, object_mask=object_mask)
+
+    debug = backbone._last_stage_debug
+    assert debug["label_embeds_abs_mean"] > 0
+    assert debug["direction_embeds_abs_mean"] > 0
+    assert "numeric_embeds_abs_mean" in debug
+    assert "tokens_before_mask_abs_mean" in debug
+    assert "tokens_after_encoder_abs_mean" in debug
+
+
 class _TinyTrajectoryModel(torch.nn.Module):
     def __init__(self, fusion_mode: str):
         super().__init__()

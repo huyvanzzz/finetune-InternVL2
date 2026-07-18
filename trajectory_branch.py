@@ -304,10 +304,12 @@ class TrajectoryBackbone(nn.Module):
         label_embeds = self.label_embedding(label_ids)
         direction_embeds = self.direction_embedding(direction_ids)
         numeric_embeds = self.numeric_mlp(numeric_feats)
-        tokens = self.object_mlp(torch.cat([label_embeds, direction_embeds, numeric_embeds], dim=-1))
+        object_inputs = torch.cat([label_embeds, direction_embeds, numeric_embeds], dim=-1)
+        tokens = self.object_mlp(object_inputs)
 
         mask = object_mask.to(tokens.dtype).unsqueeze(-1)
-        tokens = (tokens + self.slot_embedding) * mask
+        tokens_with_slot = tokens + self.slot_embedding
+        tokens = tokens_with_slot * mask
 
         key_padding_mask = object_mask == 0
         all_empty = key_padding_mask.all(dim=1)
@@ -315,9 +317,21 @@ class TrajectoryBackbone(nn.Module):
             key_padding_mask = key_padding_mask.clone()
             key_padding_mask[all_empty, 0] = False
 
-        tokens = self.set_encoder(tokens, src_key_padding_mask=key_padding_mask)
-        tokens = tokens * mask
-        return tokens
+        encoded_tokens = self.set_encoder(tokens, src_key_padding_mask=key_padding_mask)
+        output_tokens = encoded_tokens * mask
+        if getattr(self, "_enable_trajectory_grad_debug", False):
+            self._last_stage_debug = {
+                "label_embeds_abs_mean": float(label_embeds.detach().float().abs().mean().item()),
+                "direction_embeds_abs_mean": float(direction_embeds.detach().float().abs().mean().item()),
+                "numeric_embeds_abs_mean": float(numeric_embeds.detach().float().abs().mean().item()),
+                "object_inputs_abs_mean": float(object_inputs.detach().float().abs().mean().item()),
+                "tokens_before_mask_abs_mean": float(tokens_with_slot.detach().float().abs().mean().item()),
+                "mask_active": int(object_mask.sum().item()),
+                "tokens_after_mask_abs_mean": float(tokens.detach().float().abs().mean().item()),
+                "tokens_after_encoder_abs_mean": float(encoded_tokens.detach().float().abs().mean().item()),
+                "tokens_output_abs_mean": float(output_tokens.detach().float().abs().mean().item()),
+            }
+        return output_tokens
 
 
 class TrajectoryCLSHead(nn.Module):
@@ -497,6 +511,7 @@ def build_trajectory_tokens_base(model, batch_size: int, device: torch.device):
         traj_tokens_base_shape=list(traj_tokens_base.shape),
         traj_tokens_base_dtype=str(traj_tokens_base.dtype),
         traj_tokens_base_abs_mean=float(traj_tokens_base.detach().float().abs().mean().item()),
+        backbone_stage_debug=getattr(model.trajectory_backbone, "_last_stage_debug", None),
     )
     debug_tensors = getattr(model, "_last_trajectory_debug_tensors", {}) or {}
     debug_tensors["traj_tokens_base"] = traj_tokens_base
