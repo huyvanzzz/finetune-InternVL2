@@ -508,6 +508,10 @@ def _maybe_pad(inner_lists, padding_value):
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
 
 
+def _runtime_model_for_aux_inputs(model):
+    return getattr(model, "module", model)
+
+
 def forward_pretrain_batch(model, batch, device: torch.device):
     input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
     input_ids_batch = input_ids_batch.to(device)
@@ -517,11 +521,12 @@ def forward_pretrain_batch(model, batch, device: torch.device):
         torch.bfloat16 if device.type == "cuda" else torch.float32
     ).to(device)
     image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long, device=device)
+    runtime_model = _runtime_model_for_aux_inputs(model)
 
-    if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-        model.set_qformer_text(qformer_inputs[0].to(device), qformer_inputs[1].to(device))
-    if getattr(model, "trajectory_enabled", False) and trajectory_inputs is not None:
-        model.set_trajectory_inputs(
+    if getattr(runtime_model, "qformer_enabled", False) and qformer_inputs is not None:
+        runtime_model.set_qformer_text(qformer_inputs[0].to(device), qformer_inputs[1].to(device))
+    if getattr(runtime_model, "trajectory_enabled", False) and trajectory_inputs is not None:
+        runtime_model.set_trajectory_inputs(
             trajectory_inputs[0].to(device),
             trajectory_inputs[1].to(device),
             trajectory_inputs[2].to(device),
@@ -537,10 +542,10 @@ def forward_pretrain_batch(model, batch, device: torch.device):
             return_dict=True,
         )
     finally:
-        if getattr(model, "qformer_enabled", False):
-            model.clear_qformer_text()
-        if getattr(model, "trajectory_enabled", False):
-            model.clear_trajectory_inputs()
+        if getattr(runtime_model, "qformer_enabled", False):
+            runtime_model.clear_qformer_text()
+        if getattr(runtime_model, "trajectory_enabled", False):
+            runtime_model.clear_trajectory_inputs()
     return outputs.loss
 
 

@@ -284,8 +284,15 @@ class PretrainQADataset(Dataset):
         pixel_values = self._prepare_pixel_values(image)
 
         try:
+            if hasattr(self.trajectory_source, "has_record") and not self.trajectory_source.has_record(frame_path, frame_id):
+                raise PretrainSampleError(
+                    "missing_trajectory_record",
+                    f"Trajectory record not found for {(frame_path, frame_id)}",
+                )
             trajectory_fields = self.trajectory_source.encode(frame_path, frame_id)
         except Exception as exc:
+            if isinstance(exc, PretrainSampleError):
+                raise
             raise PretrainSampleError("trajectory_join_error", str(exc)) from exc
 
         if not self.movement_enabled:

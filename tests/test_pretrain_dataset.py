@@ -7,6 +7,7 @@ import torch
 
 from pretrain_dataset import (
     PretrainQADataset,
+    PretrainSampleError,
     build_pretrain_datasets,
     load_question_train_rows,
     split_question_rows_grouped,
@@ -36,6 +37,9 @@ def _write_frame_index(path: Path, frame_paths):
 class _FakeTrajectorySource:
     def __init__(self, fail_keys=None):
         self.fail_keys = set(fail_keys or [])
+
+    def has_record(self, frame_path, frame_id):
+        return (frame_path, frame_id) not in self.fail_keys
 
     def encode(self, frame_path, frame_id):
         if (frame_path, frame_id) in self.fail_keys:
@@ -223,7 +227,37 @@ def test_pretrain_dataset_tracks_random_fallback_errors(tmp_path, monkeypatch):
     assert sample["frame_path"] == "good.frame"
     assert stats["sample_error_count"] == 1
     assert stats["sample_error_rate"] == pytest.approx(1.0)
-    assert stats["error_examples"][0]["reason"] in {"image_load_error", "trajectory_join_error"}
+    assert stats["error_examples"][0]["reason"] in {"image_load_error", "missing_trajectory_record"}
+
+
+def test_pretrain_dataset_marks_missing_trajectory_record_explicitly(tmp_path, monkeypatch):
+    frame_index_path = tmp_path / "frame_index.pkl"
+    _write_frame_index(frame_index_path, ["missing.frame"])
+
+    dataset = PretrainQADataset(
+        rows=[
+            {
+                "frame_path": "missing.frame",
+                "frame_id": 8,
+                "question_id": "q1",
+                "question": "Missing?",
+                "gt": "no",
+            }
+        ],
+        frame_index_path=frame_index_path,
+        trajectory_source=_FakeTrajectorySource(fail_keys={("missing.frame", 8)}),
+        split_name="train",
+        movement_enabled=True,
+    )
+
+    monkeypatch.setattr(dataset, "_load_frame", lambda frame_path, frame_id: torch.zeros(3, 4, 4))
+
+    with pytest.raises(PretrainSampleError, match="Trajectory record not found"):
+        dataset[0]
+
+    stats = dataset.peek_error_stats()
+    assert stats["sample_error_count"] == 1
+    assert stats["error_examples"][0]["reason"] == "missing_trajectory_record"
 
 
 def test_build_pretrain_datasets_returns_disjoint_grouped_splits(tmp_path):
