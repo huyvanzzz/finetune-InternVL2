@@ -4,6 +4,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 import warnings
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch.utils.checkpoint
@@ -20,6 +21,11 @@ from .modeling_intern_vit import InternVisionModel
 
 from logutil import get_logger
 logger = get_logger()
+
+
+def _log_dynamic_vit_debug(message: str):
+    if os.environ.get("INTERNVL_DEBUG_VIT_BATCH", "").lower() in {"1", "true", "yes"}:
+        logger.debug(message)
 
 
 def version_cmp(v1, v2, op='eq'):
@@ -100,7 +106,9 @@ class InternVLChatModel(PreTrainedModel):
         input_embeds = input_embeds.reshape(B * N, C)
 
   
-        logger.debug(f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}')
+        _log_dynamic_vit_debug(
+            f'dynamic ViT batch size: {vit_batch_size}, images per sample: {vit_batch_size / B}, dynamic token length: {N}'
+        )
 
         input_ids = input_ids.reshape(B * N)
         selected = (input_ids == self.img_context_token_id)
@@ -204,7 +212,7 @@ class InternVLChatModel(PreTrainedModel):
 
         if verbose and pixel_values is not None:
             image_bs = pixel_values.shape[0]
-            logger.debug(f'dynamic ViT batch size: {image_bs}')
+            _log_dynamic_vit_debug(f'dynamic ViT batch size: {image_bs}')
 
         queries = []
         for idx, num_patches in enumerate(num_patches_list):
@@ -263,7 +271,7 @@ class InternVLChatModel(PreTrainedModel):
 
         if verbose and pixel_values is not None:
             image_bs = pixel_values.shape[0]
-            logger.debug(f'dynamic ViT batch size: {image_bs}')
+            _log_dynamic_vit_debug(f'dynamic ViT batch size: {image_bs}')
 
         for num_patches in num_patches_list:
             image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches + IMG_END_TOKEN

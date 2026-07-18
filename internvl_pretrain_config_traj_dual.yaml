@@ -105,8 +105,8 @@ training:
   lr_scheduler: "cosine"
   max_grad_norm: 1.0
   logging_steps: 10
-  log_token_stats: true
-  token_log_batches: 2
+  log_token_stats: false
+  token_log_batches: 0
   log_trainable_parameter_names: false
   profile_steps: 0
   gradient_debug_steps: 3

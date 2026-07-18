@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass
 from math import floor
 from typing import Dict
@@ -52,6 +53,24 @@ IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 EARLY_STOPPING_STATE_FILENAME = "early_stopping_state.json"
+
+
+def configure_quiet_training_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*_check_is_size will be removed.*",
+        category=FutureWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*torch\.utils\.checkpoint: the use_reentrant parameter should be passed explicitly.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*None of the inputs have requires_grad=True\. Gradients will be None.*",
+        category=UserWarning,
+    )
 
 
 class SilentLogger:
@@ -1402,6 +1421,7 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
 
 
 def main():
+    configure_quiet_training_warnings()
     set_seed(42)
     args = parse_args()
     config = load_config(args.config)
