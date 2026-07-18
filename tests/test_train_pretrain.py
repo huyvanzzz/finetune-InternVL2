@@ -14,10 +14,13 @@ from train_pretrain import (
     _write_training_state,
     build_dataloader_kwargs,
     forward_pretrain_batch,
+    get_cuda_memory_stats,
     infer_resume_position,
     inspect_optimizer_param_groups,
+    log_runtime_batch_debug,
     reduce_token_weighted_loss,
     resolve_warmup_steps,
+    summarize_runtime_batch,
     verify_flash_attention_runtime,
 )
 
@@ -299,6 +302,55 @@ def test_reduce_token_weighted_loss_uses_token_counts():
     token_count = torch.tensor(6.0)
 
     assert reduce_token_weighted_loss(loss_sum, token_count, accelerator=None).item() == 2.0
+
+
+def test_get_cuda_memory_stats_returns_zeroes_on_cpu():
+    stats = get_cuda_memory_stats(torch.device("cpu"))
+
+    assert stats == {
+        "allocated_mb": 0.0,
+        "reserved_mb": 0.0,
+        "max_allocated_mb": 0.0,
+        "max_reserved_mb": 0.0,
+    }
+
+
+def test_summarize_runtime_batch_reports_tiles_and_tokens():
+    model = _DummyModel()
+    tokenizer = _DummyTokenizer()
+    collater = PretrainCollaterFn(tokenizer, model)
+    batch = collater([_make_sample("What is closest?")])
+
+    summary = summarize_runtime_batch(batch, model)
+
+    assert summary["samples"] == 1
+    assert summary["frames"] == 1
+    assert summary["tiles_per_frame"] == [1]
+    assert summary["total_tiles"] == 1
+    assert summary["query_tokens_per_tile"] == 32
+    assert summary["total_image_tokens"] == 32
+    assert summary["max_input_tokens"] > 0
+    assert summary["max_target_tokens"] > 0
+
+
+def test_log_runtime_batch_debug_includes_memory_and_token_summary():
+    model = _DummyModel()
+    tokenizer = _DummyTokenizer()
+    collater = PretrainCollaterFn(tokenizer, model)
+    batch = collater([_make_sample("What is closest?")])
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    log_runtime_batch_debug(batch, model, torch.device("cpu"), _FakeLogger(), global_step=7, phase="pre_forward")
+
+    joined = "\n".join(messages)
+    assert "Runtime batch debug" in joined
+    assert "global_step=7" in joined
+    assert "total_image_tokens=32" in joined
+    assert "cuda_mem={'allocated_mb': 0.0" in joined
 
 
 def test_build_run_metadata_contains_reproducibility_fields(monkeypatch):

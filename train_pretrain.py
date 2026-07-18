@@ -236,6 +236,13 @@ def log_gradient_health(model, logger, max_names: int = 20):
         "bridge": 0.0,
         "other": 0.0,
     }
+    detailed_sums = {
+        "trajectory_backbone": 0.0,
+        "trajectory_cls_head": 0.0,
+        "trajectory_token_projector": 0.0,
+        "qformer_input_proj": 0.0,
+        "qformer_to_mlp1_proj": 0.0,
+    }
     grad_none = []
     bad_grad = []
     for name, param in model.named_parameters():
@@ -251,15 +258,95 @@ def log_gradient_health(model, logger, max_names: int = 20):
         norm = float(grad.float().norm().item())
         if "trajectory_" in name:
             branch_sums["trajectory"] += norm
+            if name.startswith("trajectory_backbone"):
+                detailed_sums["trajectory_backbone"] += norm
+            elif name.startswith("trajectory_cls_head"):
+                detailed_sums["trajectory_cls_head"] += norm
+            elif name.startswith("trajectory_token_projector"):
+                detailed_sums["trajectory_token_projector"] += norm
         elif "qformer_input_proj" in name or "qformer_to_mlp1_proj" in name:
             branch_sums["bridge"] += norm
+            if name.startswith("qformer_input_proj"):
+                detailed_sums["qformer_input_proj"] += norm
+            elif name.startswith("qformer_to_mlp1_proj"):
+                detailed_sums["qformer_to_mlp1_proj"] += norm
         else:
             branch_sums["other"] += norm
-    logger.info("Gradient health | norms=%s | grad_none=%s | bad_grad=%s", branch_sums, len(grad_none), len(bad_grad))
+    logger.info(
+        "Gradient health | norms=%s | detail=%s | grad_none=%s | bad_grad=%s",
+        branch_sums,
+        detailed_sums,
+        len(grad_none),
+        len(bad_grad),
+    )
     if grad_none:
         logger.warning("Trainable params with grad=None: %s", grad_none[:max_names])
     if bad_grad:
         logger.warning("Trainable params with NaN/Inf gradients: %s", bad_grad[:max_names])
+
+
+def get_cuda_memory_stats(device: torch.device) -> Dict[str, float]:
+    if not torch.cuda.is_available() or device.type != "cuda":
+        return {
+            "allocated_mb": 0.0,
+            "reserved_mb": 0.0,
+            "max_allocated_mb": 0.0,
+            "max_reserved_mb": 0.0,
+        }
+    return {
+        "allocated_mb": round(torch.cuda.memory_allocated(device) / (1024 ** 2), 2),
+        "reserved_mb": round(torch.cuda.memory_reserved(device) / (1024 ** 2), 2),
+        "max_allocated_mb": round(torch.cuda.max_memory_allocated(device) / (1024 ** 2), 2),
+        "max_reserved_mb": round(torch.cuda.max_memory_reserved(device) / (1024 ** 2), 2),
+    }
+
+
+def summarize_runtime_batch(batch, model) -> Dict:
+    input_ids_batch, label_ids_batch, _, pixel_values_batch, _, _, samples = batch
+    input_token_lengths = [int((row != 0).sum().item()) for row in input_ids_batch]
+    target_token_lengths = [int((row != -100).sum().item()) for row in label_ids_batch]
+    tiles_per_frame = []
+    frame_count = 0
+    for sample in samples:
+        sample_pixel_values = sample.get("pixel_values", [])
+        frame_count += len(sample_pixel_values)
+        tiles_per_frame.extend(int(pv.shape[0]) for pv in sample_pixel_values)
+    total_tiles = int(sum(tiles_per_frame))
+    return {
+        "samples": len(samples),
+        "frames": frame_count,
+        "tiles_per_frame": tiles_per_frame,
+        "total_tiles": total_tiles,
+        "query_tokens_per_tile": int(getattr(model, "num_image_token", 0)),
+        "total_image_tokens": int(total_tiles * int(getattr(model, "num_image_token", 0))),
+        "input_token_lengths": input_token_lengths,
+        "target_token_lengths": target_token_lengths,
+        "max_input_tokens": max(input_token_lengths) if input_token_lengths else 0,
+        "max_target_tokens": max(target_token_lengths) if target_token_lengths else 0,
+        "pixel_values_shape": tuple(pixel_values_batch.shape),
+    }
+
+
+def log_runtime_batch_debug(batch, model, device: torch.device, logger, global_step: int, phase: str):
+    summary = summarize_runtime_batch(batch, model)
+    memory = get_cuda_memory_stats(device)
+    logger.info(
+        "Runtime batch debug | phase=%s | global_step=%s | samples=%s | frames=%s | tiles_per_frame=%s | "
+        "total_tiles=%s | query_tokens_per_tile=%s | total_image_tokens=%s | max_input_tokens=%s | "
+        "max_target_tokens=%s | pixel_values_shape=%s | cuda_mem=%s",
+        phase,
+        global_step,
+        summary["samples"],
+        summary["frames"],
+        summary["tiles_per_frame"],
+        summary["total_tiles"],
+        summary["query_tokens_per_tile"],
+        summary["total_image_tokens"],
+        summary["max_input_tokens"],
+        summary["max_target_tokens"],
+        summary["pixel_values_shape"],
+        memory,
+    )
 
 
 class PretrainCollaterFn:
@@ -1012,6 +1099,8 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                 logger.info("Restored global_optimizer_step=%s", global_optimizer_step)
     profile_steps = int(config["training"].get("profile_steps", 0))
     gradient_debug_steps = int(config["training"].get("gradient_debug_steps", 1))
+    batch_debug_steps = int(config["training"].get("batch_debug_steps", 0))
+    memory_debug_steps = int(config["training"].get("memory_debug_steps", batch_debug_steps))
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -1047,6 +1136,8 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
         )
         for step, batch in enumerate(progress_bar, start=initial_step + 1):
             step_start = time.perf_counter()
+            if is_main_process and step <= batch_debug_steps:
+                log_runtime_batch_debug(batch, unwrapped_model, device, logger, global_step=step, phase="pre_forward")
             if accelerator is not None:
                 with accelerator.accumulate(model):
                     loss = forward_pretrain_batch(model, batch, device=device)
@@ -1077,6 +1168,15 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                                     global_optimizer_step,
                                     time.perf_counter() - step_start,
                                 )
+                            if global_optimizer_step <= memory_debug_steps:
+                                log_runtime_batch_debug(
+                                    batch,
+                                    unwrapped_model,
+                                    device,
+                                    logger,
+                                    global_step=global_optimizer_step,
+                                    phase="post_update",
+                                )
                         accumulated_loss_for_log = 0.0
             else:
                 loss = forward_pretrain_batch(model, batch, device=device)
@@ -1094,6 +1194,15 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                     global_steps_this_epoch += 1
                     avg_loss = accumulated_loss_for_log / accum_steps
                     metrics["train_loss"].append({"epoch": epoch + 1, "step": global_steps_this_epoch, "loss": round(avg_loss, 6)})
+                    if global_optimizer_step <= memory_debug_steps:
+                        log_runtime_batch_debug(
+                            batch,
+                            model,
+                            device,
+                            logger,
+                            global_step=global_optimizer_step,
+                            phase="post_update",
+                        )
                     accumulated_loss_for_log = 0.0
 
         if accelerator is not None:
