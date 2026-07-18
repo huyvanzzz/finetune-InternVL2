@@ -187,6 +187,16 @@ def test_trajectory_backbone_and_heads_shape_contract():
     assert concat_head(traj_tokens).shape == (2, 6, 896)
 
 
+def test_trajectory_modules_accept_configurable_dropout():
+    backbone = TrajectoryBackbone(vocab_size=8, direction_vocab_size=6, dropout=0.05)
+    cls_head = TrajectoryCLSHead(output_dim=1024, dropout=0.05)
+    concat_head = TrajectoryConcatHead(output_dim=896, dropout=0.05)
+
+    assert any(isinstance(module, torch.nn.Dropout) and module.p == pytest.approx(0.05) for module in backbone.modules())
+    assert any(isinstance(module, torch.nn.Dropout) and module.p == pytest.approx(0.05) for module in cls_head.modules())
+    assert any(isinstance(module, torch.nn.Dropout) and module.p == pytest.approx(0.05) for module in concat_head.modules())
+
+
 def test_trajectory_backbone_handles_all_empty_mask_without_nan():
     backbone = TrajectoryBackbone(vocab_size=4, direction_vocab_size=4)
     cls_head = TrajectoryCLSHead(output_dim=1024)
@@ -341,6 +351,9 @@ def test_pretrain_configs_use_upscaled_trajectory_architecture():
         "d_traj: 384",
         "num_layers: 4",
         "ffn_dim: 768",
+        "dropout: 0.05",
+        "loss_mode: \"label_smoothing\"",
+        "label_smoothing: 0.10",
     )
 
     for config_name in (

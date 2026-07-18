@@ -13,10 +13,12 @@ from train_pretrain import (
     _build_run_metadata,
     _write_training_state,
     build_dataloader_kwargs,
+    compute_generation_loss,
     forward_pretrain_batch,
     get_cuda_memory_stats,
     infer_resume_position,
     inspect_optimizer_param_groups,
+    log_trainable_parameter_summary,
     log_trajectory_path_gradients,
     log_runtime_batch_debug,
     reduce_token_weighted_loss,
@@ -178,6 +180,27 @@ def test_forward_pretrain_batch_sets_aux_inputs_on_inner_runtime_model():
     assert wrapped.wrapper_trajectory_calls == 0
 
 
+def test_compute_generation_loss_uses_label_smoothing_when_enabled():
+    logits = torch.tensor(
+        [
+            [
+                [4.0, 0.0, 0.0],
+                [0.0, 4.0, 0.0],
+                [0.0, 0.0, 4.0],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([[0, 1, -100]], dtype=torch.long)
+    outputs = SimpleNamespace(loss=torch.tensor(0.0), logits=logits)
+
+    smoothed = compute_generation_loss(outputs, labels, loss_mode="label_smoothing", label_smoothing=0.10)
+    plain = compute_generation_loss(outputs, labels, loss_mode="label_smoothing", label_smoothing=0.0)
+
+    assert smoothed > plain
+    assert torch.isfinite(smoothed)
+
+
 def test_pretrain_collater_logs_total_input_tokens(monkeypatch):
     model = _DummyModel()
     tokenizer = _DummyTokenizer()
@@ -299,6 +322,36 @@ def test_build_optimizer_separates_trajectory_and_bridge_groups():
 
     lrs = sorted(group["lr"] for group in optimizer.param_groups)
     assert lrs == [1e-05, 3e-05, 1e-04]
+
+
+def test_log_trainable_parameter_summary_is_compact_by_default():
+    model = _DummyModel()
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    log_trainable_parameter_summary(model, _FakeLogger(), include_names=False)
+
+    joined = "\n".join(messages)
+    assert "TOTAL_TRAINABLE" in joined
+    assert "trajectory_backbone.weight" not in joined
+
+
+def test_log_trainable_parameter_summary_can_dump_names():
+    model = _DummyModel()
+    messages = []
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    log_trainable_parameter_summary(model, _FakeLogger(), include_names=True)
+
+    joined = "\n".join(messages)
+    assert "trajectory_backbone.weight" in joined
+    assert "TOTAL_TRAINABLE" in joined
 
 
 def test_freeze_modules_for_pretrain_cls_add_only_enables_cls_head():

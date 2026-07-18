@@ -60,6 +60,7 @@ trajectory:
   num_heads: 4
   num_layers: 4
   ffn_dim: 768
+  dropout: 0.05
 
 pretrain:
   question_train_file: "./json/question_train_split_train.jsonl"
@@ -91,6 +92,8 @@ training:
   warmup_min_steps: 20
   warmup_max_steps: 100
   weight_decay: 0.01
+  loss_mode: "label_smoothing"
+  label_smoothing: 0.10
   early_stopping_patience: 3
   early_stopping_min_delta: 0.001
   early_stopping_burn_in_epochs: 1
@@ -104,8 +107,12 @@ training:
   logging_steps: 10
   log_token_stats: true
   token_log_batches: 2
-  profile_steps: 5
-  gradient_debug_steps: 2
+  log_trainable_parameter_names: false
+  profile_steps: 0
+  gradient_debug_steps: 3
+  gradient_health_steps: 0
+  batch_debug_steps: 0
+  memory_debug_steps: 0
 
 hardware:
   device: "cuda"
