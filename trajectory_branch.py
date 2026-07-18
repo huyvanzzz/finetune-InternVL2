@@ -468,27 +468,99 @@ def _get_trajectory_inputs(self, batch_size: int, device: torch.device):
     )
 
 
+def _update_trajectory_build_debug(model, **kwargs):
+    current = getattr(model, "_last_trajectory_debug", None)
+    if current is None:
+        current = {}
+    current.update(kwargs)
+    model._last_trajectory_debug = current
+
+
 def build_trajectory_tokens_base(model, batch_size: int, device: torch.device):
     label_ids, direction_ids, numeric_feats, object_mask = model.get_trajectory_inputs(batch_size, device)
-    return model.trajectory_backbone(
+    traj_tokens_base = model.trajectory_backbone(
         label_ids=label_ids,
         direction_ids=direction_ids,
         numeric_feats=numeric_feats,
         object_mask=object_mask,
-    ), object_mask
+    )
+    if getattr(model, "_enable_trajectory_grad_debug", False) and traj_tokens_base.requires_grad:
+        traj_tokens_base.retain_grad()
+    _update_trajectory_build_debug(
+        model,
+        label_ids_shape=list(label_ids.shape),
+        direction_ids_shape=list(direction_ids.shape),
+        numeric_feats_shape=list(numeric_feats.shape),
+        object_mask_shape=list(object_mask.shape),
+        object_mask_active=int(object_mask.sum().item()),
+        traj_tokens_base_requires_grad=bool(traj_tokens_base.requires_grad),
+        traj_tokens_base_shape=list(traj_tokens_base.shape),
+        traj_tokens_base_dtype=str(traj_tokens_base.dtype),
+        traj_tokens_base_abs_mean=float(traj_tokens_base.detach().float().abs().mean().item()),
+    )
+    debug_tensors = getattr(model, "_last_trajectory_debug_tensors", {}) or {}
+    debug_tensors["traj_tokens_base"] = traj_tokens_base
+    model._last_trajectory_debug_tensors = debug_tensors
+    return traj_tokens_base, object_mask
 
 
 def build_trajectory_features(model, batch_size: int, device: torch.device):
     traj_tokens_base, object_mask = build_trajectory_tokens_base(model, batch_size, device)
     if model.trajectory_fusion_mode == "cls_add":
-        return model.trajectory_cls_head(traj_tokens_base, object_mask)
+        cls_output = model.trajectory_cls_head(traj_tokens_base, object_mask)
+        if getattr(model, "_enable_trajectory_grad_debug", False) and cls_output.requires_grad:
+            cls_output.retain_grad()
+        _update_trajectory_build_debug(
+            model,
+            cls_output_requires_grad=bool(cls_output.requires_grad),
+            cls_output_shape=list(cls_output.shape),
+            cls_output_dtype=str(cls_output.dtype),
+            cls_output_abs_mean=float(cls_output.detach().float().abs().mean().item()),
+        )
+        debug_tensors = getattr(model, "_last_trajectory_debug_tensors", {}) or {}
+        debug_tensors["cls_output"] = cls_output
+        model._last_trajectory_debug_tensors = debug_tensors
+        return cls_output
     if model.trajectory_fusion_mode == "concat":
         projected = model.trajectory_token_projector(traj_tokens_base)
-        return projected * object_mask.to(projected.dtype).unsqueeze(-1)
+        token_output = projected * object_mask.to(projected.dtype).unsqueeze(-1)
+        if getattr(model, "_enable_trajectory_grad_debug", False) and token_output.requires_grad:
+            token_output.retain_grad()
+        _update_trajectory_build_debug(
+            model,
+            token_output_requires_grad=bool(token_output.requires_grad),
+            token_output_shape=list(token_output.shape),
+            token_output_dtype=str(token_output.dtype),
+            token_output_abs_mean=float(token_output.detach().float().abs().mean().item()),
+        )
+        debug_tensors = getattr(model, "_last_trajectory_debug_tensors", {}) or {}
+        debug_tensors["token_output"] = token_output
+        model._last_trajectory_debug_tensors = debug_tensors
+        return token_output
     if model.trajectory_fusion_mode == "dual":
         cls_output = model.trajectory_cls_head(traj_tokens_base, object_mask)
         token_output = model.trajectory_token_projector(traj_tokens_base)
         token_output = token_output * object_mask.to(token_output.dtype).unsqueeze(-1)
+        if getattr(model, "_enable_trajectory_grad_debug", False):
+            if cls_output.requires_grad:
+                cls_output.retain_grad()
+            if token_output.requires_grad:
+                token_output.retain_grad()
+        _update_trajectory_build_debug(
+            model,
+            cls_output_requires_grad=bool(cls_output.requires_grad),
+            cls_output_shape=list(cls_output.shape),
+            cls_output_dtype=str(cls_output.dtype),
+            cls_output_abs_mean=float(cls_output.detach().float().abs().mean().item()),
+            token_output_requires_grad=bool(token_output.requires_grad),
+            token_output_shape=list(token_output.shape),
+            token_output_dtype=str(token_output.dtype),
+            token_output_abs_mean=float(token_output.detach().float().abs().mean().item()),
+        )
+        debug_tensors = getattr(model, "_last_trajectory_debug_tensors", {}) or {}
+        debug_tensors["cls_output"] = cls_output
+        debug_tensors["token_output"] = token_output
+        model._last_trajectory_debug_tensors = debug_tensors
         return cls_output, token_output
     raise ValueError(f"Unsupported trajectory fusion_mode: {model.trajectory_fusion_mode}")
 

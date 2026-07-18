@@ -285,6 +285,32 @@ def log_gradient_health(model, logger, max_names: int = 20):
         logger.warning("Trainable params with NaN/Inf gradients: %s", bad_grad[:max_names])
 
 
+def log_trajectory_path_gradients(model, logger):
+    debug = getattr(model, "_last_trajectory_debug", None)
+    debug_tensors = getattr(model, "_last_trajectory_debug_tensors", None)
+    if not debug or not debug_tensors:
+        logger.info("Trajectory grad path | debug_unavailable=True")
+        return
+
+    grad_summary = {}
+    for name, tensor in debug_tensors.items():
+        if tensor is None:
+            grad_summary[name] = {"present": False}
+            continue
+        grad = getattr(tensor, "grad", None)
+        grad_summary[name] = {
+            "present": True,
+            "requires_grad": bool(getattr(tensor, "requires_grad", False)),
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "grad_is_none": grad is None,
+            "grad_norm": None if grad is None else float(grad.detach().float().norm().item()),
+            "grad_abs_mean": None if grad is None else float(grad.detach().float().abs().mean().item()),
+            "value_abs_mean": float(tensor.detach().float().abs().mean().item()),
+        }
+    logger.info("Trajectory grad path | debug=%s | tensors=%s", debug, grad_summary)
+
+
 def get_cuda_memory_stats(device: torch.device) -> Dict[str, float]:
     if not torch.cuda.is_available() or device.type != "cuda":
         return {
@@ -1148,6 +1174,9 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                 log_runtime_batch_debug(batch, unwrapped_model, device, logger, global_step=step, phase="pre_forward")
             if accelerator is not None:
                 with accelerator.accumulate(model):
+                    unwrapped_model._enable_trajectory_grad_debug = bool(is_main_process and global_optimizer_step < gradient_debug_steps)
+                    unwrapped_model._last_trajectory_debug = None
+                    unwrapped_model._last_trajectory_debug_tensors = {}
                     loss = forward_pretrain_batch(model, batch, device=device)
                     accelerator.backward(loss)
                     accumulated_loss_for_log += float(loss.detach().cpu().item())
@@ -1156,10 +1185,12 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                             torch.cuda.synchronize()
                         accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
                         if is_main_process and global_optimizer_step < gradient_debug_steps:
+                            log_trajectory_path_gradients(unwrapped_model, logger)
                             log_gradient_health(unwrapped_model, logger)
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad()
+                        unwrapped_model._enable_trajectory_grad_debug = False
                         global_optimizer_step += 1
                         global_steps_this_epoch += 1
                         avg_loss = accumulated_loss_for_log / accum_steps
@@ -1187,6 +1218,9 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                                 )
                         accumulated_loss_for_log = 0.0
             else:
+                model._enable_trajectory_grad_debug = bool(global_optimizer_step < gradient_debug_steps)
+                model._last_trajectory_debug = None
+                model._last_trajectory_debug_tensors = {}
                 loss = forward_pretrain_batch(model, batch, device=device)
                 progress_bar.set_postfix(loss=f"{loss.item():.4f}")
                 (loss / accum_steps).backward()
@@ -1194,10 +1228,12 @@ def run_pretrain_training(model, tokenizer, train_loader, val_loader, config: Di
                 if step % accum_steps == 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     if global_optimizer_step < gradient_debug_steps:
+                        log_trajectory_path_gradients(model, logger)
                         log_gradient_health(model, logger)
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
+                    model._enable_trajectory_grad_debug = False
                     global_optimizer_step += 1
                     global_steps_this_epoch += 1
                     avg_loss = accumulated_loss_for_log / accum_steps

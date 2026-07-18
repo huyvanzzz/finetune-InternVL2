@@ -134,3 +134,6 @@ def test_extract_feature_with_cls_add_records_trajectory_debug(monkeypatch):
     assert debug["traj_cls_requires_grad"] is True
     assert debug["mlp1_inputs_requires_grad_before_add"] is True
     assert debug["mlp1_inputs_requires_grad_after_add"] is True
+    assert "traj_cls" in model._last_trajectory_debug_tensors
+    assert "mlp1_inputs_before_add" in model._last_trajectory_debug_tensors
+    assert "mlp1_inputs_after_add" in model._last_trajectory_debug_tensors
