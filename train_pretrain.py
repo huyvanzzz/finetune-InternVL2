@@ -1,8 +1,10 @@
 import argparse
 import copy
 import datetime
+import inspect
 import importlib.metadata
 import json
+import logging
 import os
 import random
 import re
@@ -71,6 +73,23 @@ def configure_quiet_training_warnings():
         message=r".*None of the inputs have requires_grad=True\. Gradients will be None.*",
         category=UserWarning,
     )
+
+
+def suppress_loaded_model_debug_logs(model, logger):
+    class_name = f"{model.__class__.__module__}.{model.__class__.__name__}"
+    try:
+        code_path = inspect.getfile(model.__class__)
+    except TypeError:
+        code_path = "unknown"
+    logger.info("InternVL model code path | class=%s | path=%s", class_name, code_path)
+
+    module_logger = logging.getLogger(model.__class__.__module__)
+    module_logger.setLevel(logging.WARNING)
+    module_logger.propagate = False
+
+    parent_name = model.__class__.__module__.rsplit(".", 1)[0]
+    if parent_name and parent_name != model.__class__.__module__:
+        logging.getLogger(parent_name).setLevel(logging.WARNING)
 
 
 class SilentLogger:
@@ -749,6 +768,7 @@ def build_model_and_tokenizer(config: Dict, logger):
         model_name_or_path,
         **model_kwargs,
     )
+    suppress_loaded_model_debug_logs(model, logger)
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
         model.gradient_checkpointing_enable()

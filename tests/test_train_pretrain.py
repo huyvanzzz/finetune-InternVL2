@@ -1,4 +1,5 @@
 import json
+import logging
 from types import SimpleNamespace
 
 import torch
@@ -24,6 +25,7 @@ from train_pretrain import (
     reduce_token_weighted_loss,
     resolve_warmup_steps,
     summarize_runtime_batch,
+    suppress_loaded_model_debug_logs,
     verify_flash_attention_runtime,
 )
 
@@ -538,6 +540,26 @@ def test_verify_flash_attention_runtime_reports_flash_and_fallback_modules():
     assert report["flash_enabled_count"] == 1
     assert any(item["status"] == "flash" for item in report["modules"])
     assert any(item["status"] == "fallback" for item in report["modules"])
+
+
+def test_suppress_loaded_model_debug_logs_sets_model_module_to_warning():
+    logger_name = "fake_remote_modeling"
+    logging.getLogger(logger_name).setLevel(logging.DEBUG)
+    messages = []
+
+    class _RemoteClass:
+        __module__ = logger_name
+
+    model = _RemoteClass()
+
+    class _FakeLogger:
+        def info(self, msg, *args):
+            messages.append(msg % args if args else msg)
+
+    suppress_loaded_model_debug_logs(model, _FakeLogger())
+
+    assert logging.getLogger(logger_name).level == logging.WARNING
+    assert any("InternVL model code path" in message for message in messages)
 
 
 def test_early_stopping_state_tracks_best_and_stops_after_patience():
