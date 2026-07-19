@@ -60,7 +60,7 @@ trajectory:
   num_heads: 4
   num_layers: 4
   ffn_dim: 768
-  dropout: 0.05
+  dropout: 0.10
 
 pretrain:
   question_train_file: "./json/question_train_split_train.jsonl"
@@ -91,7 +91,7 @@ training:
   warmup_ratio: 0.1
   warmup_min_steps: 20
   warmup_max_steps: 100
-  weight_decay: 0.01
+  weight_decay: 0.02
   loss_mode: "label_smoothing"
   label_smoothing: 0.10
   early_stopping_patience: 8
