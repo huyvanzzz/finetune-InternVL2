@@ -511,11 +511,14 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     logger.info(
-        "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s",
+        "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s, lora_lr=%s, bridge_lr=%s, trajectory_lr=%s",
         loss_mode,
         label_smoothing,
         accum_steps,
         weight_decay,
+        lora_lr,
+        bridge_lr,
+        trajectory_lr,
     )
 
     param_groups = build_optimizer_param_groups(
@@ -585,7 +588,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         optimizer.zero_grad()
 
         accumulated_loss_for_log = 0.0
-        set_seed(42 + epoch)
+        set_seed(42)
+        logger.info("Epoch seed fixed | epoch=%s | seed=42", epoch + 1)
         batch_iterator = iter(train_loader)
         train_loader.collate_fn.log_token_stats = False
 

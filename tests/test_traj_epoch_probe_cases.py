@@ -242,11 +242,37 @@ def test_case2_config_targets_low_lora_lr_only():
     assert cfg["training"]["trajectory_learning_rate"] == pytest.approx(5e-4)
 
 
+def test_train_loop_uses_fixed_epoch_seed():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "set_seed(42 + epoch)" not in source
+    assert "Epoch seed fixed" in source
+
+
+def test_case3_config_combines_label_smoothing_and_low_lora_lr():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_cls_case3_label_smoothing_low_lora.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["trajectory"]["fusion_mode"] == "cls_add"
+    assert cfg["trajectory"]["d_traj"] == 384
+    assert cfg["trajectory"]["num_layers"] == 4
+    assert cfg["trajectory"]["ffn_dim"] == 768
+    assert cfg["data"]["alter_only"] is True
+    assert cfg["training"]["loss_mode"] == "label_smoothing"
+    assert cfg["training"]["label_smoothing"] == pytest.approx(0.10)
+    assert cfg["training"]["lora_learning_rate"] == pytest.approx(5e-5)
+    assert cfg["training"]["bridge_learning_rate"] == pytest.approx(5e-4)
+    assert cfg["training"]["trajectory_learning_rate"] == pytest.approx(5e-4)
+
+
 @pytest.mark.parametrize(
     ("notebook_name", "config_name"),
     [
         ("run_qformer_cls_case1_label_smoothing.ipynb", "internvl_config_traj_cls_case1_label_smoothing.yaml"),
         ("run_qformer_cls_case2_low_lora_lr.ipynb", "internvl_config_traj_cls_case2_low_lora_lr.yaml"),
+        (
+            "run_qformer_cls_case3_label_smoothing_low_lora.ipynb",
+            "internvl_config_traj_cls_case3_label_smoothing_low_lora.yaml",
+        ),
     ],
 )
 def test_new_cls_case_notebooks_point_to_expected_branch_and_config(notebook_name, config_name):
@@ -258,6 +284,8 @@ def test_new_cls_case_notebooks_point_to_expected_branch_and_config(notebook_nam
 
     assert 'TARGET_BRANCH = "feature/trajectory-qformer-restore-779"' in cell0
     assert f'CONFIG_PATH = "{config_name}"' in cell0
+    if "case3" in notebook_name:
+        assert "TARGET_COMMIT" not in cell0
     assert 'subprocess.run(["git", "fetch", "origin", TARGET_BRANCH], check=True)' in cell1
     assert 'subprocess.run(["git", "checkout", "-B", TARGET_BRANCH, f"origin/{TARGET_BRANCH}"], check=True)' in cell1
     assert 'cmd = ["python", "train.py", "--config", CONFIG_PATH]' in train_cell
