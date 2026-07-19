@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 from gptscore.constants import DEFAULT_PROMPT_PROFILE, SCHEMA_VERSION
-from gptscore.io_utils import load_pairs_file, save_json
+from gptscore.io_utils import load_existing_json, load_pairs_file, save_json
 from gptscore.judge_runner import judge_pairs_document
 from gptscore.providers import make_provider_judge_callable
 
@@ -22,12 +22,14 @@ def parse_args():
     )
     parser.add_argument("--output", default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--sample-mode", choices=["head", "random"], default="head")
     parser.add_argument("--sample-seed", type=int, default=0)
     parser.add_argument("--preview-count", type=int, default=1)
     parser.add_argument("--disable-progress", action="store_true")
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--flush-every", type=int, default=1)
     return parser.parse_args()
 
 
@@ -36,13 +38,15 @@ def default_output_path(input_path):
     stem = path.stem
     if stem.endswith("_pairs"):
         stem = stem[:-6]
-    return str(path.with_name(f"{stem}_gptscore_judged.json"))
+    return str(Path("results") / f"{stem}_gptscore_judged.json")
 
 
 def main():
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     pairs_doc = load_pairs_file(args.input)
+    output_path = args.output or default_output_path(args.input)
+    existing_judged = load_existing_json(output_path) or {}
     judge_callable, resolved_model, resolved_prompt_version = make_provider_judge_callable(
         provider=args.provider,
         model=args.model,
@@ -59,14 +63,17 @@ def main():
         prompt_version=resolved_prompt_version,
         schema_version=SCHEMA_VERSION,
         limit=args.limit,
+        offset=args.offset,
         sample_mode=args.sample_mode,
         sample_seed=args.sample_seed,
         preview_count=args.preview_count,
         show_progress=not args.disable_progress,
+        existing_judged=existing_judged,
+        output_path=output_path,
+        flush_every=args.flush_every,
     )
     judged["input_file"] = str(Path(args.input).resolve())
     judged["prompt_profile"] = args.prompt_profile
-    output_path = args.output or default_output_path(args.input)
     save_json(output_path, judged)
     print(f"Saved judged results to: {output_path}")
 

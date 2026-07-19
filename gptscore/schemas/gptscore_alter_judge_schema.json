@@ -5,18 +5,6 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "gate": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "polarity_reversal": { "type": "boolean" },
-          "unsafe_action": { "type": "boolean" }
-        },
-        "required": [
-          "polarity_reversal",
-          "unsafe_action"
-        ]
-      },
       "signals_in_gt": {
         "type": "object",
         "additionalProperties": false,
@@ -52,7 +40,6 @@
       "overall_rationale": { "type": "string" }
     },
     "required": [
-      "gate",
       "signals_in_gt",
       "criteria",
       "overall_rationale"

@@ -3,10 +3,6 @@ from gptscore.scoring import score_judge_output, score_judged_document
 
 def _judge_output(label="Acceptable", unsafe_action=False, polarity_reversal=False):
     return {
-        "gate": {
-            "polarity_reversal": polarity_reversal,
-            "unsafe_action": unsafe_action,
-        },
         "signals_in_gt": {
             "has_direction_anchor": True,
             "has_action_demand": True,
@@ -26,17 +22,17 @@ def _judge_output(label="Acceptable", unsafe_action=False, polarity_reversal=Fal
 def test_score_judge_output_maps_labels_and_computes_mean():
     scored = score_judge_output(_judge_output(label="Acceptable"))
 
-    assert scored["mean_before_gate"] == 2.0
-    assert scored["applied_gate_cap"] == "none"
     assert scored["overall_score"] == 2.0
 
 
-def test_score_judge_output_caps_score_for_unsafe_action():
-    scored = score_judge_output(_judge_output(label="Strong", unsafe_action=True))
+def test_score_judge_output_uses_mean_over_applicable_criteria_only():
+    payload = _judge_output(label="Strong")
+    payload["criteria"]["direction_fidelity"]["applicable"] = False
+    payload["criteria"]["direction_fidelity"]["label"] = None
 
-    assert scored["mean_before_gate"] == 3.0
-    assert scored["overall_score"] == 0.0
-    assert scored["applied_gate_cap"] == "score=0.0_by_unsafe_action"
+    scored = score_judge_output(payload)
+
+    assert scored["overall_score"] == 3.0
 
 
 def test_score_judged_document_skips_non_scored_items_and_reports_mean():

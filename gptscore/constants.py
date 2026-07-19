@@ -8,11 +8,6 @@ CRITERION_KEYS = [
     "spoken_guidance_quality",
 ]
 
-GATE_KEYS = [
-    "polarity_reversal",
-    "unsafe_action",
-]
-
 SIGNAL_KEYS = [
     "has_direction_anchor",
     "has_action_demand",
@@ -30,4 +25,4 @@ DEFAULT_OPENAI_MODEL = "gpt-4o"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
 DEFAULT_PROMPT_PROFILE = "variant_action_looser"
 
-SCHEMA_VERSION = "gptscore-alter-schema-v2-two-gates"
+SCHEMA_VERSION = "gptscore-alter-schema-v3-no-gates"

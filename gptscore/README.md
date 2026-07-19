@@ -31,14 +31,31 @@ python -m gptscore.run_judge --input results/qformer_eval_test_alter_pairs.json 
 python -m gptscore.score_results --input results/qformer_eval_test_alter_gptscore_judged.json
 ```
 
-## Ghi chu gate
+## Ghi chu scoring
 
-Pipeline nay chi con 2 gate:
+Pipeline nay khong con gate.
 
-- `polarity_reversal`
-- `unsafe_action`
+Diem cuoi duoc tinh bang trung binh tren cac criterion `applicable`:
 
-Loi direction duoc cham qua criteria, khong con gate cap rieng.
+- `Fail -> 0`
+- `Weak -> 1`
+- `Acceptable -> 2`
+- `Strong -> 3`
+- `label = null` bi loai khoi mean
+
+## Chay nhieu dot trong cung 1 file judged
+
+Co the chay theo tung doan va noi vao cung 1 file:
+
+```bash
+python -m gptscore.run_judge --input results/qformer_eval_test_alter_pairs.json --provider openrouter --offset 0 --limit 100
+python -m gptscore.run_judge --input results/qformer_eval_test_alter_pairs.json --provider openrouter --offset 100 --limit 200
+```
+
+Mac dinh output van la mot file judged duy nhat suy ra tu input.
+
+- Neu file judged da ton tai, pipeline se load lai va bo qua cac `id` da cham
+- Pipeline flush file lien tuc trong luc chay, nen neu het API / dung giua chung thi van giu duoc cac item da cham
 
 ## API keys
 

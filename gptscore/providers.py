@@ -31,11 +31,11 @@ def resolve_provider_config(provider, model=None):
 PROMPT_PROFILE_TO_FILE = {
     "baseline_142": (
         "gptscore_alter_system_prompt.txt",
-        "gptscore-alter-v1-baseline-142",
+        "gptscore-alter-v4f-baseline-142-no-gates-direction-anchor-and-route-structure-tuned",
     ),
     "variant_action_looser": (
         "gptscore_alter_system_prompt_variant_action_looser.txt",
-        "gptscore-alter-v2-variant-action-looser-two-gates",
+        "gptscore-alter-v4f-variant-action-looser-no-gates-direction-anchor-and-route-structure-tuned",
     ),
 }
 

@@ -10,12 +10,12 @@ def test_load_prompt_assets_uses_action_looser_profile_by_default():
         package_dir
     )
 
-    assert "Direction errors must be judged through the criteria" in system_prompt
-    assert "unsafe_direction_reversal" not in system_prompt
+    assert "Do not return overall_score." in system_prompt
+    assert "unsafe_action" not in system_prompt
     assert "{{GROUND_TRUTH}}" in user_template
     assert json_schema["name"] == "gptscore_alter_judge"
-    assert "unsafe_direction_reversal" not in json_schema["schema"]["properties"]["gate"]["properties"]
-    assert prompt_version == "gptscore-alter-v2-variant-action-looser-two-gates"
+    assert "gate" not in json_schema["schema"]["properties"]
+    assert prompt_version == "gptscore-alter-v4f-variant-action-looser-no-gates-direction-anchor-and-route-structure-tuned"
 
 
 def test_load_prompt_assets_can_select_baseline_profile_with_two_gates():
@@ -27,10 +27,10 @@ def test_load_prompt_assets_can_select_baseline_profile_with_two_gates():
     )
 
     assert "General warnings such as pay attention to safety do not by themselves create an action demand." in system_prompt
-    assert "Direction errors must be judged through the criteria" in system_prompt
-    assert "unsafe_direction_reversal" not in system_prompt
-    assert "unsafe_direction_reversal" not in json_schema["schema"]["properties"]["gate"]["properties"]
-    assert prompt_version == "gptscore-alter-v1-baseline-142"
+    assert "Do not return overall_score." in system_prompt
+    assert "unsafe_action" not in system_prompt
+    assert "gate" not in json_schema["schema"]["properties"]
+    assert prompt_version == "gptscore-alter-v4f-baseline-142-no-gates-direction-anchor-and-route-structure-tuned"
 
 
 def test_load_prompt_assets_can_select_action_looser_profile_explicitly():
@@ -43,5 +43,5 @@ def test_load_prompt_assets_can_select_action_looser_profile_explicitly():
 
     assert "When the generation still gives a broadly safe warning or avoidance cue, do not use Fail unless it clearly contradicts or defeats the required action." in system_prompt
     assert "Milder issues such as partial action loss, weaker caution, or a less specific but still broadly safe next-step cue should usually be Weak rather than Fail." in system_prompt
-    assert "unsafe_direction_reversal" not in system_prompt
-    assert prompt_version == "gptscore-alter-v2-variant-action-looser-two-gates"
+    assert "unsafe_action" not in system_prompt
+    assert prompt_version == "gptscore-alter-v4f-variant-action-looser-no-gates-direction-anchor-and-route-structure-tuned"

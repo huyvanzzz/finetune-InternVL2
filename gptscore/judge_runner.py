@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from gptscore.io_utils import select_pair_items
+from gptscore.io_utils import save_json, select_pair_items
 from gptscore.validation import validate_input_pair, validate_judge_output
 
 
@@ -34,21 +34,33 @@ def judge_pairs_document(
     prompt_version,
     schema_version,
     limit=None,
+    offset=0,
     sample_mode="head",
     sample_seed=0,
     preview_count=1,
     emit=None,
     show_progress=True,
     progress_factory=None,
+    existing_judged=None,
+    output_path=None,
+    flush_every=1,
 ):
     selected_pairs = select_pair_items(
         pairs_doc,
         limit=limit,
+        offset=offset,
         sample_mode=sample_mode,
         sample_seed=sample_seed,
     )
     emit = emit or _default_emit
     progress_factory = progress_factory or _default_progress_factory
+    existing_judged = existing_judged or {}
+    existing_items = list(existing_judged.get("items", []))
+    processed_ids = {
+        item.get("id")
+        for item in existing_items
+        if item.get("judge_status") is not None
+    }
 
     judged = {
         "provider": provider,
@@ -59,10 +71,12 @@ def judge_pairs_document(
         "split": pairs_doc.get("split"),
         "total_input_pairs": len(pairs_doc.get("pairs", [])),
         "selected_count": len(selected_pairs),
+        "offset": int(offset or 0),
         "sample_mode": sample_mode,
         "sample_seed": sample_seed,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "items": [],
+        "created_at": existing_judged.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "items": existing_items,
     }
 
     _emit_preview(selected_pairs, preview_count, emit)
@@ -71,9 +85,14 @@ def judge_pairs_document(
     if show_progress:
         iterable = progress_factory(iterable, total=len(selected_pairs), desc="Judging pairs")
 
+    appended_since_flush = 0
     for index, pair in iterable:
+        pair_id = pair.get("id", index + int(offset or 0))
+        if pair_id in processed_ids:
+            continue
+
         item = {
-            "id": pair.get("id", index),
+            "id": pair_id,
             "ground_truth": pair.get("ground_truth"),
             "generation": pair.get("generation"),
             "judge_status": None,
@@ -120,5 +139,18 @@ def judge_pairs_document(
             item["judge_status"] = "scored"
 
         judged["items"].append(item)
+        processed_ids.add(pair_id)
+        appended_since_flush += 1
+
+        if output_path and flush_every and appended_since_flush >= int(flush_every):
+            judged["updated_at"] = datetime.now(timezone.utc).isoformat()
+            save_json(output_path, judged)
+            appended_since_flush = 0
+
+    judged["selected_count"] = len(selected_pairs)
+    judged["processed_count"] = len(processed_ids)
+    judged["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if output_path:
+        save_json(output_path, judged)
 
     return judged

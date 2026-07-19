@@ -17,7 +17,7 @@ def default_output_path(input_path):
     stem = path.stem
     if stem.endswith("_gptscore_judged"):
         stem = stem[:-16]
-    return str(path.with_name(f"{stem}_gptscore_scored.json"))
+    return str(Path("results") / f"{stem}_gptscore_scored.json")
 
 
 def main():
@@ -32,4 +32,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

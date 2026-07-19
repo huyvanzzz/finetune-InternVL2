@@ -1,6 +1,6 @@
 from collections import Counter
 
-from gptscore.constants import GATE_KEYS, LABEL_TO_SCORE
+from gptscore.constants import LABEL_TO_SCORE
 from gptscore.validation import validate_judge_output
 
 
@@ -17,23 +17,8 @@ def score_judge_output(judge_output):
     if not applicable_scores:
         raise ValueError("No applicable criteria available for scoring")
 
-    mean_before_gate = sum(applicable_scores) / len(applicable_scores)
-    gate = judge_output["gate"]
-
-    applied_gate_cap = "none"
-    overall_score = mean_before_gate
-    if gate["polarity_reversal"]:
-        applied_gate_cap = "score=0.0_by_polarity_reversal"
-        overall_score = 0.0
-    elif gate["unsafe_action"]:
-        applied_gate_cap = "score=0.0_by_unsafe_action"
-        overall_score = 0.0
-
     return {
-        "mean_before_gate": round(mean_before_gate, 6),
-        "applied_gate_cap": applied_gate_cap,
-        "overall_score": round(overall_score, 6),
-        "gate": {key: gate[key] for key in GATE_KEYS},
+        "overall_score": round(sum(applicable_scores) / len(applicable_scores), 6),
     }
 
 
@@ -42,7 +27,6 @@ def score_judged_document(judged_doc):
     scored_items = []
     skipped_items = []
     judge_status_counts = Counter()
-    gate_counts = Counter()
 
     for item in items:
         status = item.get("judge_status", "unknown")
@@ -72,10 +56,6 @@ def score_judged_document(judged_doc):
         enriched["sample_score"] = sample_score
         scored_items.append(enriched)
 
-        for gate_name, enabled in sample_score["gate"].items():
-            if enabled:
-                gate_counts[gate_name] += 1
-
     valid_scores = [item["sample_score"]["overall_score"] for item in scored_items]
     mean_over_valid_samples = (
         round(sum(valid_scores) / len(valid_scores), 6) if valid_scores else None
@@ -88,7 +68,6 @@ def score_judged_document(judged_doc):
             "skipped_items": len(skipped_items),
             "judge_status_counts": dict(judge_status_counts),
             "mean_over_valid_samples": mean_over_valid_samples,
-            "gate_counts": dict(gate_counts),
         },
         "scored_items": scored_items,
         "skipped_items": skipped_items,

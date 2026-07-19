@@ -2,4 +2,3 @@ Task: Evaluate the generated navigation guidance against the ground-truth guidan
 
 Ground truth: {{GROUND_TRUTH}}
 Generation: {{GENERATION}}
-

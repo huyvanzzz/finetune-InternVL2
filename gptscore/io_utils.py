@@ -15,8 +15,20 @@ def save_json(path, payload):
     )
 
 
-def select_pair_items(doc, limit=None, sample_mode="head", sample_seed=0):
+def load_existing_json(path):
+    target = Path(path)
+    if not target.exists():
+        return None
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def select_pair_items(doc, limit=None, sample_mode="head", sample_seed=0, offset=0):
     pairs = list(doc.get("pairs", []))
+    offset = max(int(offset or 0), 0)
+    if offset >= len(pairs):
+        return []
+
+    pairs = pairs[offset:]
     if limit is None or int(limit) <= 0 or int(limit) >= len(pairs):
         return pairs
 
@@ -29,4 +41,3 @@ def select_pair_items(doc, limit=None, sample_mode="head", sample_seed=0):
         return [item for _, item in chosen]
 
     return pairs[:limit]
-

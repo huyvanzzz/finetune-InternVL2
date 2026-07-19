@@ -1,4 +1,4 @@
-from gptscore.constants import ALLOWED_LABELS, CRITERION_KEYS, GATE_KEYS, SIGNAL_KEYS
+from gptscore.constants import ALLOWED_LABELS, CRITERION_KEYS, SIGNAL_KEYS
 
 
 def validate_input_pair(pair):
@@ -20,16 +20,6 @@ def validate_judge_output(payload):
     errors = []
     if not isinstance(payload, dict):
         return ["Judge output must be a JSON object"]
-
-    gate = payload.get("gate")
-    if not isinstance(gate, dict):
-        errors.append("Missing or invalid gate object")
-    else:
-        for key in GATE_KEYS:
-            if key not in gate:
-                errors.append(f"Missing gate field: {key}")
-            elif not isinstance(gate[key], bool):
-                errors.append(f"Gate field must be bool: {key}")
 
     signals = payload.get("signals_in_gt")
     if not isinstance(signals, dict):
@@ -71,4 +61,3 @@ def validate_judge_output(payload):
         errors.append("overall_rationale must be a string")
 
     return errors
-
