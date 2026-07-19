@@ -12,10 +12,6 @@ def test_judge_pairs_document_records_scored_and_transport_error_items():
     }
 
     valid_output = {
-        "gate": {
-            "polarity_reversal": False,
-            "unsafe_action": False,
-        },
         "signals_in_gt": {
             "has_direction_anchor": False,
             "has_action_demand": True,
@@ -47,6 +43,7 @@ def test_judge_pairs_document_records_scored_and_transport_error_items():
         prompt_version="v1",
         schema_version="v1",
         limit=None,
+        offset=0,
         sample_mode="head",
         sample_seed=0,
     )
@@ -69,10 +66,6 @@ def test_judge_pairs_document_can_limit_random_subset():
 
     def fake_judge(_ground_truth, _generation):
         return {
-            "gate": {
-                "polarity_reversal": False,
-                "unsafe_action": False,
-            },
             "signals_in_gt": {
                 "has_direction_anchor": False,
                 "has_action_demand": False,
@@ -96,6 +89,7 @@ def test_judge_pairs_document_can_limit_random_subset():
         prompt_version="v1",
         schema_version="v1",
         limit=3,
+        offset=0,
         sample_mode="random",
         sample_seed=11,
     )
@@ -120,10 +114,6 @@ def test_judge_pairs_document_emits_preview_for_first_selected_sample():
 
     def fake_judge(_ground_truth, _generation):
         return {
-            "gate": {
-                "polarity_reversal": False,
-                "unsafe_action": False,
-            },
             "signals_in_gt": {
                 "has_direction_anchor": False,
                 "has_action_demand": False,
@@ -147,6 +137,7 @@ def test_judge_pairs_document_emits_preview_for_first_selected_sample():
         prompt_version="v1",
         schema_version="v1",
         preview_count=1,
+        offset=0,
         emit=fake_emit,
     )
 
@@ -175,10 +166,6 @@ def test_judge_pairs_document_uses_progress_factory_when_requested():
 
     def fake_judge(_ground_truth, _generation):
         return {
-            "gate": {
-                "polarity_reversal": False,
-                "unsafe_action": False,
-            },
             "signals_in_gt": {
                 "has_direction_anchor": False,
                 "has_action_demand": False,
@@ -201,8 +188,91 @@ def test_judge_pairs_document_uses_progress_factory_when_requested():
         judge_callable=fake_judge,
         prompt_version="v1",
         schema_version="v1",
+        offset=0,
         show_progress=True,
         progress_factory=fake_progress,
     )
 
     assert progress_calls == [{"total": 3, "desc": "Judging pairs"}]
+
+
+def test_judge_pairs_document_appends_to_existing_output_and_skips_existing_ids(tmp_path):
+    doc = {
+        "checkpoint": "dummy",
+        "split": "test_alter",
+        "pairs": [
+            {"id": 0, "ground_truth": "gt0", "generation": "gen0"},
+            {"id": 1, "ground_truth": "gt1", "generation": "gen1"},
+            {"id": 2, "ground_truth": "gt2", "generation": "gen2"},
+        ],
+    }
+    output_path = tmp_path / "judged.json"
+    existing = {
+        "items": [
+            {
+                "id": 0,
+                "ground_truth": "gt0",
+                "generation": "gen0",
+                "judge_status": "scored",
+                "raw_response": "{}",
+                "judge_output": {
+                    "signals_in_gt": {
+                        "has_direction_anchor": False,
+                        "has_action_demand": False,
+                        "has_hazard_or_path_state": False,
+                    },
+                    "criteria": {
+                        "safety_correctness": {"applicable": True, "label": "Acceptable", "rationale": "ok"},
+                        "hazard_path_state_fidelity": {"applicable": False, "label": None, "rationale": "na"},
+                        "direction_fidelity": {"applicable": False, "label": None, "rationale": "na"},
+                        "action_usefulness": {"applicable": False, "label": None, "rationale": "na"},
+                        "spoken_guidance_quality": {"applicable": True, "label": "Acceptable", "rationale": "ok"},
+                    },
+                    "overall_rationale": "ok",
+                },
+                "error_type": None,
+                "error_message": None,
+            }
+        ]
+    }
+
+    calls = []
+
+    def fake_judge(ground_truth, generation):
+        calls.append((ground_truth, generation))
+        return {
+            "signals_in_gt": {
+                "has_direction_anchor": False,
+                "has_action_demand": False,
+                "has_hazard_or_path_state": False,
+            },
+            "criteria": {
+                "safety_correctness": {"applicable": True, "label": "Acceptable", "rationale": "ok"},
+                "hazard_path_state_fidelity": {"applicable": False, "label": None, "rationale": "na"},
+                "direction_fidelity": {"applicable": False, "label": None, "rationale": "na"},
+                "action_usefulness": {"applicable": False, "label": None, "rationale": "na"},
+                "spoken_guidance_quality": {"applicable": True, "label": "Acceptable", "rationale": "ok"},
+            },
+            "overall_rationale": "ok",
+        }, '{"mock":"raw"}'
+
+    judged = judge_pairs_document(
+        doc,
+        provider="openai",
+        model="gpt-4o",
+        judge_callable=fake_judge,
+        prompt_version="v1",
+        schema_version="v1",
+        limit=2,
+        offset=1,
+        sample_mode="head",
+        sample_seed=0,
+        existing_judged=existing,
+        output_path=output_path,
+        flush_every=1,
+        show_progress=False,
+    )
+
+    assert [item["id"] for item in judged["items"]] == [0, 1, 2]
+    assert calls == [("gt1", "gen1"), ("gt2", "gen2")]
+    assert output_path.exists()

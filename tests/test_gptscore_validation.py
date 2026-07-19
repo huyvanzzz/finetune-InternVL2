@@ -3,10 +3,6 @@ from gptscore.validation import validate_input_pair, validate_judge_output
 
 def _valid_judge_output():
     return {
-        "gate": {
-            "polarity_reversal": False,
-            "unsafe_action": False,
-        },
         "signals_in_gt": {
             "has_direction_anchor": True,
             "has_action_demand": True,
@@ -72,3 +68,12 @@ def test_validate_judge_output_rejects_non_applicable_with_non_null_label():
     errors = validate_judge_output(payload)
 
     assert any("direction_fidelity" in error and "null" in error for error in errors)
+
+
+def test_validate_judge_output_rejects_missing_signals():
+    payload = _valid_judge_output()
+    del payload["signals_in_gt"]["has_action_demand"]
+
+    errors = validate_judge_output(payload)
+
+    assert any("has_action_demand" in error for error in errors)

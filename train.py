@@ -407,7 +407,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         optimizer.zero_grad()
 
         accumulated_loss_for_log = 0.0
-        set_seed(42 + epoch)
+        set_seed(42)
         batch_iterator = iter(train_loader)
         train_loader.collate_fn.log_token_stats = False
 
