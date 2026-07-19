@@ -233,6 +233,7 @@ class CollaterFn:
         self.model = model
         self.log_token_stats = False
         self.token_log_remaining = 0
+        self.alter_only = False
 
     def __call__(self, batch):
         label_ids_batch = []
@@ -273,14 +274,16 @@ class CollaterFn:
                 total_image_tokens_in_sample = total_tiles * self.model.num_image_token
                 total_sequence_length = len(input_ids) + len(answer_ids) + 1
                 logger.info(
-                    "[INFO] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    "[INFO][ALTER_ONLY=%s] Image token stats | frames=%s | tiles_per_frame=%s | query_tokens_per_tile=%s | total_image_tokens=%s",
+                    self.alter_only,
                     len(pixel_values),
                     num_patches_list,
                     self.model.num_image_token,
                     total_image_tokens_in_sample,
                 )
                 logger.info(
-                    "[INFO] Text tokens - input: %s, answer: %s, total: %s",
+                    "[INFO][ALTER_ONLY=%s] Text tokens - input: %s, answer: %s, total: %s",
+                    self.alter_only,
                     len(input_ids),
                     len(answer_ids),
                     total_sequence_length,
@@ -719,9 +722,10 @@ if __name__ == "__main__":
     collate_fn_wrapper = CollaterFn(tokenizer, model)
     collate_fn_wrapper.log_token_stats = bool(config["training"].get("log_token_stats", False))
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
+    collate_fn_wrapper.alter_only = bool(config["data"].get("alter_only", False))
 
     logger.info(
-        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s",
+        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s",
         getattr(model, "qformer_enabled", False),
         getattr(model, "trajectory_enabled", False),
         getattr(model, "trajectory_fusion_mode", "disabled"),
@@ -730,6 +734,7 @@ if __name__ == "__main__":
         getattr(model, "qformer_num_query_tokens", getattr(model, "num_image_token", "unknown")),
         collate_fn_wrapper.log_token_stats,
         collate_fn_wrapper.token_log_remaining,
+        collate_fn_wrapper.alter_only,
     )
 
     train_loader = DataLoader(
