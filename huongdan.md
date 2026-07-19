@@ -14,13 +14,13 @@
 Neu da co SSH key tren may local:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 ssh -p 54105 root@210.64.18.177 -L 8080:localhost:8080
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54105 root@210.64.18.177
 ```
 
 Vi du:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 38213 root@220.130.209.122
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54105 root@210.64.18.177
 ```
 
 Neu lan dau ket noi, go `yes`.
@@ -160,7 +160,7 @@ Neu can resume:
 ```bash
 accelerate launch --num_processes 2 train_pretrain.py \
   --config internvl_pretrain_config_traj_cls.yaml \
-  --checkpoint outputs/pretrain_traj_cls/<run_id>/last
+  --checkpoint outputs/pretrain_traj_cls/stage_pretrain__cls_add__movement_on__20260718171246/best
 ```
 
 ## 11. Khi tat may local
