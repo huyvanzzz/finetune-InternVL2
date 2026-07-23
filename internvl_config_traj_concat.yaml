@@ -56,10 +56,10 @@ trajectory:
   num_objects: 6
   d_cat: 32
   d_numeric_hidden: 64
-  d_traj: 128
+  d_traj: 384
   num_heads: 4
-  num_layers: 2
-  ffn_dim: 256
+  num_layers: 4
+  ffn_dim: 768
 
 data:
   name: "minhdang0901/WAD_Images_All_Size"
