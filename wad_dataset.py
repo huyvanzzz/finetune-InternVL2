@@ -10,6 +10,38 @@ from preprocessing import format_ground_truth, get_response_format
 # BẮT BUỘC: Import hàm xử lý ảnh từ file data.py của tác giả zhangfaen
 from data import process_image
 
+
+def has_nonempty_qa(sample: Dict) -> bool:
+    qa = sample.get('QA')
+    if not isinstance(qa, dict):
+        return False
+    return bool(str(qa.get('Q', '')).strip())
+
+
+def summarize_qa_rows(rows: List[Dict]) -> Dict[str, int]:
+    with_qa = sum(1 for row in rows if has_nonempty_qa(row))
+    total = len(rows)
+    return {
+        "total": total,
+        "with_qa": with_qa,
+        "without_qa": total - with_qa,
+    }
+
+
+def filter_alter_only_rows(rows: List[Dict]) -> List[Dict]:
+    return [row for row in rows if not has_nonempty_qa(row)]
+
+
+def _print_debug_samples(name: str, rows: List[Dict], limit: int) -> None:
+    for i, row in enumerate(rows[:limit], start=1):
+        print(
+            f"  [DEBUG] {name} sample {i}: "
+            f"frame_path={row.get('frame_path')} | "
+            f"has_qa={has_nonempty_qa(row)} | "
+            f"gt={str(row.get('GT', row.get('gt', '')))[:120]}"
+        )
+
+
 class WADDatasetForInternVL(Dataset):
     def __init__(
         self,
@@ -122,7 +154,7 @@ Follow Chain-of-Thought reasoning:
 3. Decision: Formulate the final "instruction"."""
 
             # Kiểm tra xem có câu hỏi phụ không
-            has_question = sample.get('QA') and sample['QA'].get('Q')
+            has_question = has_nonempty_qa(sample)
             
             if has_question:
                 if self.response_format == 'direct_text':
@@ -252,6 +284,34 @@ def build_dataset(config: Dict):
         train_size=train_size,
         random_state=config['data']['seed']
     )
+
+    train_rows = [train_dataset.metadata[int(idx)] for idx in train_indices]
+    val_rows = [train_dataset.metadata[int(idx)] for idx in val_indices]
+    alter_only = bool(config.get('data', {}).get('alter_only', False))
+    debug_dataset_stats = bool(config.get('training', {}).get('debug_dataset_stats', False))
+    debug_dataset_samples = int(config.get('training', {}).get('debug_dataset_samples', 2))
+
+    if debug_dataset_stats:
+        print(f"QA stats before alter-only filter | train={summarize_qa_rows(train_rows)} | val={summarize_qa_rows(val_rows)}")
+
+    if alter_only:
+        train_indices = [idx for idx in train_indices if not has_nonempty_qa(train_dataset.metadata[int(idx)])]
+        val_indices = [idx for idx in val_indices if not has_nonempty_qa(train_dataset.metadata[int(idx)])]
+        train_rows = [train_dataset.metadata[int(idx)] for idx in train_indices]
+        val_rows = [train_dataset.metadata[int(idx)] for idx in val_indices]
+        print(
+            "alter-only filter applied | "
+            f"train={summarize_qa_rows(train_rows)} | val={summarize_qa_rows(val_rows)}"
+        )
+        if not train_indices:
+            raise ValueError("No training samples remain after alter-only filter.")
+        if not val_indices:
+            raise ValueError("No validation samples remain after alter-only filter.")
+
+    if debug_dataset_stats:
+        print(f"Final split stats | alter_only={alter_only} | train={summarize_qa_rows(train_rows)} | val={summarize_qa_rows(val_rows)}")
+        _print_debug_samples("train", train_rows, debug_dataset_samples)
+        _print_debug_samples("val", val_rows, debug_dataset_samples)
     
     from torch.utils.data import Subset
     train_subset = Subset(train_dataset, train_indices)
