@@ -55,6 +55,7 @@ data:
   train_split: 0.9
   seed: 42
   response_format: "direct_text"
+  alter_only: true
 
 training:
   output_dir: "./outputs/internvl3_2b"
@@ -82,6 +83,8 @@ training:
   start_step: 0
   log_token_stats: true
   token_log_batches: 5
+  debug_dataset_stats: true
+  debug_dataset_samples: 2
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]
