@@ -66,3 +66,4 @@ def test_trajectory_finetune_configs_use_upscaled_architecture():
         assert traj_cfg["d_traj"] == 384
         assert traj_cfg["num_layers"] == 4
         assert traj_cfg["ffn_dim"] == 768
+        assert traj_cfg["dropout"] == 0.10
