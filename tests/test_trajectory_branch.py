@@ -76,6 +76,22 @@ def test_trajectory_source_builds_stable_vocab_and_exact_join(tmp_path):
     assert source.has_record("sample_a.frame", 7) is False
 
 
+def test_trajectory_backbone_state_dict_layout_is_dropout_stable():
+    for dropout in (0.0, 0.10):
+        backbone = TrajectoryBackbone(
+            vocab_size=5,
+            direction_vocab_size=5,
+            dropout=dropout,
+        )
+        state_keys = set(backbone.state_dict())
+
+        assert "numeric_mlp.3.weight" in state_keys
+        assert "numeric_mlp.3.bias" in state_keys
+        assert "object_mlp.3.weight" in state_keys
+        assert "object_mlp.3.bias" in state_keys
+        assert any(isinstance(module, torch.nn.Dropout) and module.p == dropout for module in backbone.modules())
+
+
 def test_resolve_trajectory_source_path_accepts_directory(tmp_path):
     image_dir = tmp_path / "image"
     image_dir.mkdir()
@@ -236,6 +252,23 @@ def test_trajectory_load_fails_fast_on_mode_mismatch(tmp_path):
 
     mismatch = _TinyTrajectoryModel("concat")
     with pytest.raises(ValueError, match="Trajectory fusion mode mismatch"):
+        load_trajectory_branch(mismatch, str(tmp_path), strict=True)
+
+
+def test_trajectory_load_reports_architecture_mismatch(tmp_path):
+    model = _TinyTrajectoryModel("cls_add")
+    save_trajectory_branch(model, str(tmp_path))
+
+    mismatch = _TinyTrajectoryModel("cls_add")
+    mismatch.trajectory_backbone = TrajectoryBackbone(
+        vocab_size=5,
+        direction_vocab_size=5,
+        d_traj=384,
+        num_layers=4,
+        ffn_dim=768,
+        dropout=0.10,
+    )
+    with pytest.raises(RuntimeError, match="Trajectory checkpoint architecture mismatch"):
         load_trajectory_branch(mismatch, str(tmp_path), strict=True)
 
 

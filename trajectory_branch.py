@@ -45,6 +45,7 @@ def get_trajectory_config(config: Dict) -> Dict:
     traj_cfg.setdefault("num_heads", 4)
     traj_cfg.setdefault("num_layers", 2)
     traj_cfg.setdefault("ffn_dim", 256)
+    traj_cfg.setdefault("dropout", 0.0)
     return traj_cfg
 
 
@@ -272,6 +273,7 @@ class TrajectoryBackbone(nn.Module):
         num_heads: int = 4,
         num_layers: int = 2,
         ffn_dim: int = 256,
+        dropout: float = 0.0,
         num_objects: int = TRAJECTORY_NUM_OBJECTS,
     ):
         super().__init__()
@@ -282,11 +284,13 @@ class TrajectoryBackbone(nn.Module):
         self.numeric_mlp = nn.Sequential(
             nn.Linear(TRAJECTORY_NUMERIC_DIM, d_numeric_hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(d_numeric_hidden, d_numeric_hidden),
         )
         self.object_mlp = nn.Sequential(
             nn.Linear(d_cat + d_dir + d_numeric_hidden, d_traj),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(d_traj, d_traj),
         )
         self.slot_embedding = nn.Parameter(torch.zeros(1, num_objects, d_traj))
@@ -296,7 +300,7 @@ class TrajectoryBackbone(nn.Module):
             dim_feedforward=ffn_dim,
             batch_first=True,
             activation="gelu",
-            dropout=0.0,
+            dropout=dropout,
         )
         self.set_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
@@ -321,17 +325,18 @@ class TrajectoryBackbone(nn.Module):
 
 
 class TrajectoryCLSHead(nn.Module):
-    def __init__(self, input_dim: int = 128, output_dim: int = 1024, num_heads: int = 4):
+    def __init__(self, input_dim: int = 128, output_dim: int = 1024, num_heads: int = 4, dropout: float = 0.0):
         super().__init__()
         self.cls_query = nn.Parameter(torch.zeros(1, 1, input_dim))
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=input_dim,
             num_heads=num_heads,
             batch_first=True,
-            dropout=0.0,
+            dropout=dropout,
         )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(input_dim),
+            nn.Dropout(dropout),
             nn.Linear(input_dim, output_dim),
         )
 
@@ -352,10 +357,11 @@ class TrajectoryCLSHead(nn.Module):
 
 
 class TrajectoryConcatHead(nn.Module):
-    def __init__(self, input_dim: int = 128, output_dim: int = 896):
+    def __init__(self, input_dim: int = 128, output_dim: int = 896, dropout: float = 0.0):
         super().__init__()
         self.proj = nn.Sequential(
             nn.LayerNorm(input_dim),
+            nn.Dropout(dropout),
             nn.Linear(input_dim, output_dim),
         )
 
@@ -402,15 +408,19 @@ def attach_trajectory_branch(
         num_heads=int(traj_cfg["num_heads"]),
         num_layers=int(traj_cfg["num_layers"]),
         ffn_dim=int(traj_cfg["ffn_dim"]),
+        dropout=float(traj_cfg["dropout"]),
         num_objects=int(traj_cfg["num_objects"]),
     ).to(dtype=torch.float32)
     model.trajectory_cls_head = TrajectoryCLSHead(
         input_dim=int(traj_cfg["d_traj"]),
         output_dim=pixel_shuffle_dim,
+        num_heads=int(traj_cfg["num_heads"]),
+        dropout=float(traj_cfg["dropout"]),
     ).to(dtype=torch.float32)
     model.trajectory_token_projector = TrajectoryConcatHead(
         input_dim=int(traj_cfg["d_traj"]),
         output_dim=llm_hidden_size,
+        dropout=float(traj_cfg["dropout"]),
     ).to(dtype=torch.float32)
 
     if fusion_mode == "cls_add":
@@ -562,5 +572,12 @@ def load_trajectory_branch(model, checkpoint_dir: str, strict: bool = True):
             for key, value in state.items()
             if key.startswith(module_name + ".")
         }
-        module.load_state_dict(module_state, strict=True)
+        try:
+            module.load_state_dict(module_state, strict=True)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Trajectory checkpoint architecture mismatch while loading "
+                f"{module_name}. Check fusion_mode/d_traj/num_layers/ffn_dim/dropout/code version. "
+                f"Checkpoint dir: {checkpoint_dir}. Original error: {exc}"
+            ) from exc
     return True
