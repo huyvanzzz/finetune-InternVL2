@@ -644,7 +644,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             train_loader.dataset.set_epoch(epoch)
 
         accumulated_loss_for_log = 0.0
-        set_seed(42 + epoch)
+        set_seed(42)
+        logger.info("Epoch seed fixed | epoch=%s | seed=42", epoch + 1)
         if debug_log_rng_digest:
             logger.info("[DEBUG_RNG] epoch=%s stage=epoch_seed digest=%s", epoch + 1, runtime_rng_digest(include_cuda=torch.cuda.is_available()))
         batch_iterator = iter(train_loader)
