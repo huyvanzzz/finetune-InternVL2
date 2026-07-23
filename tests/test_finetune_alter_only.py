@@ -44,3 +44,25 @@ def test_trajectory_finetune_configs_enable_alter_only_debug():
         assert cfg["data"]["alter_only"] is True
         assert cfg["training"]["debug_dataset_stats"] is True
         assert cfg["training"]["debug_dataset_samples"] == 2
+
+
+def test_finetune_epoch_seed_is_fixed():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "set_seed(42 + epoch)" not in source
+    assert "set_seed(42)" in source
+    assert "Epoch seed fixed" in source
+
+
+def test_trajectory_finetune_configs_use_upscaled_architecture():
+    for config_name in (
+        "internvl_config_traj_cls.yaml",
+        "internvl_config_traj_concat.yaml",
+        "internvl_config_traj_dual.yaml",
+    ):
+        cfg = yaml.safe_load((ROOT / config_name).read_text(encoding="utf-8"))
+        traj_cfg = cfg["trajectory"]
+
+        assert traj_cfg["d_traj"] == 384
+        assert traj_cfg["num_layers"] == 4
+        assert traj_cfg["ffn_dim"] == 768
