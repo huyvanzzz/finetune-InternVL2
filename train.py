@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -222,6 +223,50 @@ def log_pretrain_checkpoint_verification(model, checkpoint_dir, logger):
     return verification
 
 
+def compute_sequence_loss(logits, labels, loss_mode: str, label_smoothing: float):
+    shifted_logits = logits[..., :-1, :].contiguous()
+    shifted_labels = labels[..., 1:].contiguous().to(shifted_logits.device)
+    flat_logits = shifted_logits.view(-1, shifted_logits.size(-1))
+    flat_labels = shifted_labels.view(-1)
+    if loss_mode == "label_smoothing":
+        return F.cross_entropy(
+            flat_logits,
+            flat_labels,
+            ignore_index=-100,
+            label_smoothing=label_smoothing,
+        )
+    if loss_mode == "cross_entropy":
+        return F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
+    raise ValueError(f"Unsupported loss_mode: {loss_mode}")
+
+
+def build_optimizer_param_groups(model, *, lora_lr: float, bridge_lr: float, trajectory_lr: float):
+    groups = {
+        "trajectory": {"params": [], "param_names": [], "lr": trajectory_lr, "name": "trajectory"},
+        "bridge": {"params": [], "param_names": [], "lr": bridge_lr, "name": "bridge"},
+        "lora_rest": {"params": [], "param_names": [], "lr": lora_lr, "name": "lora_rest"},
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(part in name for part in ("trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector")):
+            group = groups["trajectory"]
+        elif any(part in name for part in ("qformer_input_proj", "qformer_to_mlp1_proj")):
+            group = groups["bridge"]
+        else:
+            group = groups["lora_rest"]
+        group["params"].append(param)
+        group["param_names"].append(name)
+
+    grouped_ids = [id(param) for group in groups.values() for param in group["params"]]
+    if len(grouped_ids) != len(set(grouped_ids)):
+        raise ValueError("Duplicate trainable parameter detected across optimizer groups.")
+    trainable_ids = {id(param) for param in model.parameters() if param.requires_grad}
+    if set(grouped_ids) != trainable_ids:
+        raise ValueError("Optimizer groups do not cover exactly all trainable parameters.")
+    return [group for group in groups.values() if group["params"]]
+
+
 def maybe_pad(inner_lists, padding_value):
     tensor_list = [torch.tensor(inner_list, dtype=torch.long) for inner_list in inner_lists]
     return pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
@@ -383,7 +428,7 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
-def eval_model(model, val_loader, step, epoch, epochs):
+def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smoothing: float):
     model.eval()
     with torch.no_grad():
         total_eval_loss = 0
@@ -417,7 +462,12 @@ def eval_model(model, val_loader, step, epoch, epochs):
                 model.clear_qformer_text()
             if getattr(model, "trajectory_enabled", False):
                 model.clear_trajectory_inputs()
-            loss = outputs.loss
+            loss = compute_sequence_loss(
+                logits=outputs.logits,
+                labels=label_ids_batch,
+                loss_mode=loss_mode,
+                label_smoothing=label_smoothing,
+            )
             total_eval_loss += loss.item()
             total_eval_batchs += 1
             if total_eval_batchs == 200:
@@ -440,6 +490,11 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
     log_token_stats = bool(config["training"].get("log_token_stats", False))
+    loss_mode = str(config["training"].get("loss_mode", "cross_entropy"))
+    label_smoothing = float(config["training"].get("label_smoothing", 0.0))
+    lora_lr = float(config["training"].get("lora_learning_rate", lr))
+    bridge_lr = float(config["training"].get("bridge_learning_rate", config["training"].get("proj_learning_rate", lr)))
+    trajectory_lr = float(config["training"].get("trajectory_learning_rate", config["training"].get("proj_learning_rate", lr)))
     metrics_path = os.path.join(output_dir, "metrics.json")
 
     def save_metrics(metrics: dict):
@@ -451,33 +506,34 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
     logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    logger.info(f"Training config: LR={lr}, Accum_steps={accum_steps}, Weight_decay={weight_decay}")
+    logger.info(
+        "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s, "
+        "lora_lr=%s, bridge_lr=%s, trajectory_lr=%s",
+        loss_mode,
+        label_smoothing,
+        accum_steps,
+        weight_decay,
+        lora_lr,
+        bridge_lr,
+        trajectory_lr,
+    )
 
-    proj_lr = float(config["training"].get("proj_learning_rate", lr))
-    proj_param_names = {
-        "qformer_input_proj",
-        "qformer_to_mlp1_proj",
-        "trajectory_backbone",
-        "trajectory_cls_head",
-        "trajectory_token_projector",
-    }
-
-    proj_params = [
-        p for n, p in model.named_parameters()
-        if p.requires_grad and any(pn in n for pn in proj_param_names)
-    ]
-    other_params = [
-        p for n, p in model.named_parameters()
-        if p.requires_grad and not any(pn in n for pn in proj_param_names)
-    ]
-
-    logger.info(f"Param groups | proj_layers: {sum(p.numel() for p in proj_params):,} params @ lr={proj_lr} | lora+rest: {sum(p.numel() for p in other_params):,} params @ lr={lr}")
+    optimizer_groups = build_optimizer_param_groups(
+        model,
+        lora_lr=lora_lr,
+        bridge_lr=bridge_lr,
+        trajectory_lr=trajectory_lr,
+    )
+    logger.info(
+        "Param groups | %s",
+        " | ".join(
+            f"{group['name']}: {sum(p.numel() for p in group['params']):,} params @ lr={group['lr']}"
+            for group in optimizer_groups
+        ),
+    )
 
     optimizer = AdamW(
-        [
-            {"params": proj_params, "lr": proj_lr},
-            {"params": other_params, "lr": lr},
-        ],
+        optimizer_groups,
         weight_decay=weight_decay,
         foreach=False,
     )
@@ -581,11 +637,17 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             if getattr(model, "trajectory_enabled", False):
                 model.clear_trajectory_inputs()
 
-            loss = outputs.loss / accum_steps
-            progress_bar.set_postfix(loss=f"{outputs.loss.item():.4f}")
+            raw_loss = compute_sequence_loss(
+                logits=outputs.logits,
+                labels=label_ids_batch,
+                loss_mode=loss_mode,
+                label_smoothing=label_smoothing,
+            )
+            loss = raw_loss / accum_steps
+            progress_bar.set_postfix(loss=f"{raw_loss.item():.4f}")
             loss.backward()
 
-            accumulated_loss_for_log += outputs.loss.item()
+            accumulated_loss_for_log += raw_loss.item()
 
             if i % accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
@@ -604,7 +666,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
             if eval_steps and i % eval_steps == 0:
                 logger.info(f"Running evaluation at step {i}...")
-                val_loss = eval_model(model, val_loader, i, epoch, epochs)
+                val_loss = eval_model(model, val_loader, i, epoch, epochs, loss_mode, label_smoothing)
                 if val_loss is not None:
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
@@ -726,7 +788,7 @@ if __name__ == "__main__":
     collate_fn_wrapper.alter_only = bool(config["data"].get("alter_only", False))
 
     logger.info(
-        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s",
+        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s | loss_mode=%s | label_smoothing=%.3f",
         getattr(model, "qformer_enabled", False),
         getattr(model, "trajectory_enabled", False),
         getattr(model, "trajectory_fusion_mode", "disabled"),
@@ -736,6 +798,8 @@ if __name__ == "__main__":
         collate_fn_wrapper.log_token_stats,
         collate_fn_wrapper.token_log_remaining,
         collate_fn_wrapper.alter_only,
+        config["training"].get("loss_mode", "cross_entropy"),
+        float(config["training"].get("label_smoothing", 0.0)),
     )
 
     train_loader = DataLoader(

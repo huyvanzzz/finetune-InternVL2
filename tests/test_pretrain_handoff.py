@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -166,6 +168,48 @@ def test_mode_gated_trajectory_trainability_controls_optimizer_membership(
     for module_name in expected_absent:
         assert states[module_name] is False
         assert not any(module_name in name for name in optimizer_like_names)
+
+
+def test_finetune_optimizer_groups_split_lora_bridge_and_trajectory_lrs(monkeypatch):
+    import importlib
+
+    fake_peft = types.SimpleNamespace(
+        LoraConfig=object,
+        PeftModel=types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: None),
+        get_peft_model=lambda model, *_args, **_kwargs: model,
+        prepare_model_for_kbit_training=lambda model, **_kwargs: model,
+    )
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+    sys.modules.pop("train", None)
+    train = importlib.import_module("train")
+    model = _TinyCombined()
+    model.trajectory_fusion_mode = "cls_add"
+    model.language_model = torch.nn.Module()
+    model.language_model.lora_A = torch.nn.Linear(4, 4, bias=False)
+    model.language_model.lora_B = torch.nn.Linear(4, 4, bias=False)
+
+    apply_mode_gated_trajectory_trainability(model)
+    groups = train.build_optimizer_param_groups(
+        model,
+        lora_lr=5e-5,
+        bridge_lr=5e-4,
+        trajectory_lr=5e-4,
+    )
+
+    names_by_group = {group["name"]: set(group["param_names"]) for group in groups}
+    lrs = {group["name"]: group["lr"] for group in groups}
+    grouped_param_ids = [id(param) for group in groups for param in group["params"]]
+
+    assert lrs["trajectory"] == pytest.approx(5e-4)
+    assert lrs["bridge"] == pytest.approx(5e-4)
+    assert lrs["lora_rest"] == pytest.approx(5e-5)
+    assert any("trajectory_backbone" in name for name in names_by_group["trajectory"])
+    assert any("trajectory_cls_head" in name for name in names_by_group["trajectory"])
+    assert not any("trajectory_token_projector" in name for name in names_by_group["trajectory"])
+    assert any("qformer_input_proj" in name for name in names_by_group["bridge"])
+    assert any("qformer_to_mlp1_proj" in name for name in names_by_group["bridge"])
+    assert any("lora_A" in name for name in names_by_group["lora_rest"])
+    assert len(grouped_param_ids) == len(set(grouped_param_ids))
 
 
 def test_verify_loaded_pretrain_modules_detects_exact_tensor_match(tmp_path):

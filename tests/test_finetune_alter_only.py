@@ -1,11 +1,29 @@
+import importlib
+import json
+import sys
+import types
 from pathlib import Path
 
+import pytest
+import torch
 import yaml
 
 import wad_dataset
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_train_module(monkeypatch):
+    fake_peft = types.SimpleNamespace(
+        LoraConfig=object,
+        PeftModel=types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: None),
+        get_peft_model=lambda model, *_args, **_kwargs: model,
+        prepare_model_for_kbit_training=lambda model, **_kwargs: model,
+    )
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+    sys.modules.pop("train", None)
+    return importlib.import_module("train")
 
 
 def test_alter_only_helpers_filter_out_rows_with_nonempty_qa():
@@ -67,3 +85,68 @@ def test_trajectory_finetune_configs_use_upscaled_architecture():
         assert traj_cfg["num_layers"] == 4
         assert traj_cfg["ffn_dim"] == 768
         assert traj_cfg["dropout"] == 0.10
+
+
+def test_sequence_loss_supports_cross_entropy_and_label_smoothing(monkeypatch):
+    train = _load_train_module(monkeypatch)
+    logits = torch.tensor([[[5.0, -1.0, -2.0], [0.1, 0.2, 2.5]]], dtype=torch.float32)
+    labels = torch.tensor([[0, 2]], dtype=torch.long)
+
+    ce = train.compute_sequence_loss(
+        logits=logits,
+        labels=labels,
+        loss_mode="cross_entropy",
+        label_smoothing=0.0,
+    )
+    expected_ce = torch.nn.functional.cross_entropy(
+        logits[..., :-1, :].contiguous().view(-1, logits.shape[-1]),
+        labels[..., 1:].contiguous().view(-1),
+        ignore_index=-100,
+    )
+    smoothed_zero = train.compute_sequence_loss(
+        logits=logits,
+        labels=labels,
+        loss_mode="label_smoothing",
+        label_smoothing=0.0,
+    )
+    smoothed = train.compute_sequence_loss(
+        logits=logits,
+        labels=labels,
+        loss_mode="label_smoothing",
+        label_smoothing=0.10,
+    )
+
+    assert torch.allclose(ce, expected_ce, atol=1e-6)
+    assert torch.allclose(smoothed_zero, ce, atol=1e-6)
+    assert torch.isfinite(smoothed)
+    assert not torch.allclose(smoothed, ce)
+
+
+def test_cls_case3_config_combines_label_smoothing_low_lora_and_pretrain_ready_architecture():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_cls_case3_label_smoothing_low_lora.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["trajectory"]["fusion_mode"] == "cls_add"
+    assert cfg["trajectory"]["d_traj"] == 384
+    assert cfg["trajectory"]["num_layers"] == 4
+    assert cfg["trajectory"]["ffn_dim"] == 768
+    assert cfg["trajectory"]["dropout"] == 0.10
+    assert cfg["data"]["alter_only"] is True
+    assert cfg["training"]["loss_mode"] == "label_smoothing"
+    assert cfg["training"]["label_smoothing"] == pytest.approx(0.10)
+    assert cfg["training"]["lora_learning_rate"] == pytest.approx(5e-5)
+    assert cfg["training"]["bridge_learning_rate"] == pytest.approx(5e-4)
+    assert cfg["training"]["trajectory_learning_rate"] == pytest.approx(5e-4)
+
+
+def test_cls_case3_notebook_keeps_pretrain_checkpoint_surface():
+    notebook = json.loads((ROOT / "run_qformer_cls_case3_label_smoothing_low_lora.ipynb").read_text(encoding="utf-8"))
+    cell0 = "".join(notebook["cells"][0]["source"])
+    train_cell = "".join(notebook["cells"][7]["source"])
+    infer_cell = "".join(notebook["cells"][8]["source"])
+
+    assert 'TARGET_BRANCH = "feature/trajectory-pretrain-qformer"' in cell0
+    assert 'CONFIG_PATH = "internvl_config_traj_cls_case3_label_smoothing_low_lora.yaml"' in cell0
+    assert 'TRAIN_CHECKPOINT = ""' in train_cell
+    assert 'PRETRAIN_CHECKPOINT = ""' in train_cell
+    assert 'cmd += ["--pretrain_checkpoint", PRETRAIN_CHECKPOINT]' in train_cell
+    assert '"--split", "test_alter"' in infer_cell
