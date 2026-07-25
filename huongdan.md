@@ -11,16 +11,23 @@
 
 ## 2. SSH tu may local
 
+Neu chua co SSH key tren may local, chay PowerShell tren may local roi copy public key vao Vast.ai phan `SSH Keys`:
+
+```powershell
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_ed25519
+Get-Content $env:USERPROFILE\.ssh\id_ed25519.pub
+```
+
 Neu da co SSH key tren may local:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54105 root@210.64.18.177
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54398 root@210.64.18.177
 ```
 
 Vi du:
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54105 root@210.64.18.177
+ssh -i $env:USERPROFILE\.ssh\id_ed25519 -p 54398 root@210.64.18.177
 ```
 
 Neu lan dau ket noi, go `yes`.
