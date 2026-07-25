@@ -294,6 +294,30 @@ def test_concat_case1_config_targets_label_smoothing_only():
     assert cfg["training"]["trajectory_learning_rate"] == pytest.approx(5e-4)
 
 
+def test_concat_case4_config_targets_low_lora_only():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat_case4_low_lora.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["trajectory"]["fusion_mode"] == "concat"
+    assert cfg["trajectory"]["d_traj"] == 384
+    assert cfg["trajectory"]["num_layers"] == 4
+    assert cfg["trajectory"]["ffn_dim"] == 768
+    assert cfg["data"]["alter_only"] is True
+    assert cfg["training"]["loss_mode"] == "cross_entropy"
+    assert cfg["training"]["label_smoothing"] == pytest.approx(0.0)
+    assert float(cfg["training"]["lora_learning_rate"]) == pytest.approx(5e-5)
+    assert float(cfg["training"]["bridge_learning_rate"]) == pytest.approx(5e-4)
+    assert float(cfg["training"]["trajectory_learning_rate"]) == pytest.approx(5e-4)
+
+
+def test_concat_baseline_config_remains_non_case_low_lora_free():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["trajectory"]["fusion_mode"] == "concat"
+    assert cfg["training"]["loss_mode"] == "cross_entropy"
+    assert cfg["training"]["label_smoothing"] == pytest.approx(0.0)
+    assert float(cfg["training"]["lora_learning_rate"]) == pytest.approx(2e-4)
+
+
 @pytest.mark.parametrize(
     ("notebook_name", "config_name"),
     [
@@ -310,6 +334,10 @@ def test_concat_case1_config_targets_label_smoothing_only():
         (
             "run_qformer_concat_case1_label_smoothing.ipynb",
             "internvl_config_traj_concat_case1_label_smoothing.yaml",
+        ),
+        (
+            "run_qformer_concat_case4_low_lora.ipynb",
+            "internvl_config_traj_concat_case4_low_lora.yaml",
         ),
     ],
 )
