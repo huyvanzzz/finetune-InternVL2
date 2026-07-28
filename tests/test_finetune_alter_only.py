@@ -169,7 +169,9 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["training"]["fp16"] is False
     assert cfg["training"]["use_accelerate"] is True
     assert cfg["training"]["batch_size"] == 2
+    assert cfg["training"]["val_batch_size"] == 8
     assert cfg["training"]["gradient_accumulation_steps"] == 8
+    assert cfg["evaluation"]["batch_size"] == 8
     assert cfg["hardware"]["num_workers"] == 4
     assert cfg["hardware"]["pin_memory"] is True
     assert cfg["hardware"]["persistent_workers"] is True
@@ -224,6 +226,15 @@ def test_train_source_uses_interval_logging_and_suppresses_runtime_noise():
     assert "dynamic ViT batch size:" in source
     assert 'train_log_interval = int(config["training"].get("train_log_interval", 100))' in source
     assert "Train progress | epoch=%s/%s | batch=%s/%s | opt_step=%s | avg_loss=%.4f | lr=%.6g" in source
+
+
+def test_train_source_supports_separate_val_and_test_batch_sizes_with_accelerate_gather():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert 'val_batch_size = int(config["training"].get("val_batch_size", batch_size))' in source
+    assert 'test_batch_size = int(config.get("evaluation", {}).get("batch_size", 1))' in source
+    assert "dist.gather_object(" in source
+    assert "build_test_alter_loader(config, batch_size=test_batch_size)" in source
 
 
 def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():

@@ -586,7 +586,7 @@ def prepare_test_auxiliary_data(config):
     return frame_index, bbox_by_folder, trajectory_source
 
 
-def build_test_alter_loader(config):
+def build_test_alter_loader(config, batch_size: int):
     response_format = get_response_format(config)
     frame_index, bbox_by_folder, trajectory_source = prepare_test_auxiliary_data(config)
     dataset_dict = load_dataset(
@@ -601,7 +601,7 @@ def build_test_alter_loader(config):
         split="test",
         response_format=response_format,
     )
-    return DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch)
+    return DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: batch)
 
 
 def run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation_config):
@@ -635,66 +635,92 @@ def run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation
     return response.split(template.sep)[0].strip()
 
 
-def run_epoch_test_infer(model, tokenizer, config, output_dir, epoch, device):
+def run_epoch_test_infer(model, tokenizer, config, output_dir, epoch, device, accelerator=None):
     from scripts.metrics import VLMMetrics
 
-    test_loader = build_test_alter_loader(config)
+    test_batch_size = int(config.get("evaluation", {}).get("batch_size", 1))
+    test_loader = build_test_alter_loader(config, batch_size=test_batch_size)
+    if accelerator is not None:
+        test_loader = accelerator.prepare(test_loader)
     response_format = get_response_format(config)
     metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"
     epoch_dir = os.path.join(output_dir, f"epoch_{epoch}")
     output_file = os.path.join(epoch_dir, "eval_test_alter.json")
     checkpoint_label = epoch_dir
 
-    predictions = []
-    references = []
-    detailed_results = []
+    local_predictions = []
+    local_references = []
+    local_results = []
     evaluator = VLMMetrics()
+    is_main_process = accelerator is None or accelerator.is_main_process
 
     model.eval()
     with torch.no_grad():
-        for idx, batch in enumerate(test_loader):
-            sample = batch[0]
-            pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
-            pixel_values = pixel_values.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
-            question = str(sample["question"])
-            ground_truth = str(sample["answer"])
-            generation_config = dict(
-                max_new_tokens=512,
-                num_beams=3,
-                do_sample=False,
-                repetition_penalty=1.3,
-                early_stopping=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                q_ids, q_mask = model.encode_qformer_texts(
-                    [qformer_text] * pixel_values.shape[0],
-                    device=pixel_values.device,
+        for batch in test_loader:
+            for sample in batch:
+                sample_id = int(str(sample.get("questionId", len(local_results))))
+                pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
+                pixel_values = pixel_values.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
+                question = str(sample["question"])
+                ground_truth = str(sample["answer"])
+                generation_config = dict(
+                    max_new_tokens=512,
+                    num_beams=3,
+                    do_sample=False,
+                    repetition_penalty=1.3,
+                    early_stopping=True,
                 )
-                model.set_qformer_text(q_ids, q_mask)
-            if getattr(model, "trajectory_enabled", False):
-                model.set_trajectory_inputs(
-                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
-                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
-                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).to(device),
-                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
-                )
-            response = run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation_config)
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
-            if getattr(model, "trajectory_enabled", False):
-                model.clear_trajectory_inputs()
+                if getattr(model, "qformer_enabled", False):
+                    qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                    q_ids, q_mask = model.encode_qformer_texts(
+                        [qformer_text] * pixel_values.shape[0],
+                        device=pixel_values.device,
+                    )
+                    model.set_qformer_text(q_ids, q_mask)
+                if getattr(model, "trajectory_enabled", False):
+                    model.set_trajectory_inputs(
+                        sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                        sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                        sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).to(device),
+                        sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                    )
+                response = run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation_config)
+                if getattr(model, "qformer_enabled", False):
+                    model.clear_qformer_text()
+                if getattr(model, "trajectory_enabled", False):
+                    model.clear_trajectory_inputs()
 
-            predictions.append(response)
-            references.append(ground_truth)
-            detailed_results.append(
-                {
-                    "id": idx,
-                    "question": question,
-                    "prediction": response,
-                    "ground_truth": ground_truth,
-                }
-            )
+                local_predictions.append(response)
+                local_references.append(ground_truth)
+                local_results.append(
+                    {
+                        "id": sample_id,
+                        "question": question,
+                        "prediction": response,
+                        "ground_truth": ground_truth,
+                    }
+                )
+
+    if accelerator is not None:
+        gathered_results = [None] * accelerator.num_processes if is_main_process else None
+        dist.gather_object(local_results, gathered_results, dst=0)
+        if not is_main_process:
+            model.train()
+            if getattr(model, "qformer_enabled", False):
+                model.qformer.eval()
+                model.mlp1.eval()
+            return None
+        detailed_results = []
+        for chunk in gathered_results:
+            if chunk:
+                detailed_results.extend(chunk)
+        detailed_results.sort(key=lambda item: item["id"])
+        predictions = [item["prediction"] for item in detailed_results]
+        references = [item["ground_truth"] for item in detailed_results]
+    else:
+        detailed_results = local_results
+        predictions = local_predictions
+        references = local_references
 
     metrics = evaluator.compute(predictions, references, target_field=metric_target_field)
     final_output = {
@@ -802,6 +828,8 @@ def train_model(
     lora_lr = float(config["training"].get("lora_learning_rate", lr))
     bridge_lr = float(config["training"].get("bridge_learning_rate", config["training"].get("proj_learning_rate", lr)))
     trajectory_lr = float(config["training"].get("trajectory_learning_rate", config["training"].get("proj_learning_rate", lr)))
+    batch_size = int(config["training"]["batch_size"])
+    val_batch_size = int(config["training"].get("val_batch_size", batch_size))
     metrics_path = os.path.join(output_dir, "metrics.json")
     is_main_process = accelerator is None or accelerator.is_main_process
     device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1070,13 +1098,15 @@ def train_model(
                 output_dir=output_dir,
                 epoch=epoch + 1,
                 device=device,
+                accelerator=accelerator,
             )
-            metrics["epoch_summary"][-1]["test_alter_metrics"] = {
-                key: round(float(value), 6) for key, value in test_summary["metrics"].items()
-            }
-            metrics["epoch_summary"][-1]["test_alter_output_file"] = test_summary["output_file"]
-            metrics["epoch_summary"][-1]["test_alter_pairs_file"] = test_summary["pairs_file"]
-            save_metrics(metrics)
+            if test_summary is not None:
+                metrics["epoch_summary"][-1]["test_alter_metrics"] = {
+                    key: round(float(value), 6) for key, value in test_summary["metrics"].items()
+                }
+                metrics["epoch_summary"][-1]["test_alter_output_file"] = test_summary["output_file"]
+                metrics["epoch_summary"][-1]["test_alter_pairs_file"] = test_summary["pairs_file"]
+                save_metrics(metrics)
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
@@ -1227,6 +1257,12 @@ if __name__ == "__main__":
             config["training"].get("loss_mode", "cross_entropy"),
             float(config["training"].get("label_smoothing", 0.0)),
         )
+        logger.info(
+            "Eval/Test runtime | val_batch_size=%s | test_batch_size=%s | distributed_test=%s",
+            val_batch_size,
+            int(config.get("evaluation", {}).get("batch_size", 1)),
+            distributed,
+        )
 
     dataloader_kwargs = build_dataloader_kwargs(config)
 
@@ -1240,7 +1276,7 @@ if __name__ == "__main__":
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=val_batch_size,
         collate_fn=collate_fn_wrapper,
         shuffle=False,
         **dataloader_kwargs,

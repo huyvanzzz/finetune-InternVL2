@@ -75,6 +75,7 @@ training:
   output_dir: "./outputs/internvl3_2b_traj_concat_bestshot_bf16_2gpu"
   num_epochs: 5
   batch_size: 2
+  val_batch_size: 8
   gradient_accumulation_steps: 8
   learning_rate: 2e-4
   proj_learning_rate: 5e-4
@@ -103,7 +104,7 @@ training:
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]
-  batch_size: 1
+  batch_size: 8
 
 hardware:
   device: "cuda"
