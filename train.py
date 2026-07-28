@@ -2,7 +2,9 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
+import contextlib
 import datetime
+import io
 import json
 import pickle
 import re
@@ -68,6 +70,39 @@ class SilentLogger:
 
     def error(self, *args, **kwargs):
         return None
+
+
+class _LineFilterBuffer(io.TextIOBase):
+    def __init__(self, wrapped, blocked_substrings):
+        self.wrapped = wrapped
+        self.blocked_substrings = tuple(blocked_substrings)
+        self._pending = ""
+
+    def write(self, s):
+        self._pending += s
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            if not any(token in line for token in self.blocked_substrings):
+                self.wrapped.write(line + "\n")
+        return len(s)
+
+    def flush(self):
+        if self._pending and not any(token in self._pending for token in self.blocked_substrings):
+            self.wrapped.write(self._pending)
+        self._pending = ""
+        self.wrapped.flush()
+
+
+@contextlib.contextmanager
+def suppress_runtime_noise():
+    blocked = (
+        "dynamic ViT batch size:",
+        "`use_cache=True` is incompatible with gradient checkpointing.",
+    )
+    stdout_filter = _LineFilterBuffer(sys.stdout, blocked)
+    stderr_filter = _LineFilterBuffer(sys.stderr, blocked)
+    with contextlib.redirect_stdout(stdout_filter), contextlib.redirect_stderr(stderr_filter):
+        yield
 
 
 def load_config(config_path: str) -> Dict:
@@ -589,12 +624,13 @@ def run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation
     generation_config = dict(generation_config)
     generation_config["eos_token_id"] = eos_token_id
     generation_config["pad_token_id"] = eos_token_id
-    generation_output = model.generate(
-        pixel_values=pixel_values,
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        **generation_config,
-    )
+    with suppress_runtime_noise():
+        generation_output = model.generate(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_config,
+        )
     response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
     return response.split(template.sep)[0].strip()
 
@@ -616,7 +652,7 @@ def run_epoch_test_infer(model, tokenizer, config, output_dir, epoch, device):
 
     model.eval()
     with torch.no_grad():
-        for idx, batch in enumerate(tqdm(test_loader, desc=f"Testing epoch {epoch} on test_alter", leave=False)):
+        for idx, batch in enumerate(test_loader):
             sample = batch[0]
             pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
             pixel_values = pixel_values.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
@@ -686,12 +722,7 @@ def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smo
         total_eval_loss = 0.0
         total_eval_batchs = 0
         eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
-        for batch in tqdm(
-            val_loader,
-            desc=eval_desc,
-            leave=False,
-            disable=accelerator is not None and not accelerator.is_main_process,
-        ):
+        for batch in val_loader:
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
             input_ids_batch = input_ids_batch.to(device)
             label_ids_batch = label_ids_batch.to(device)
@@ -708,13 +739,14 @@ def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smo
                     trajectory_inputs[3].to(device),
                 )
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
+            with suppress_runtime_noise():
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
             if getattr(model, "qformer_enabled", False):
                 model.clear_qformer_text()
             if getattr(model, "trajectory_enabled", False):
@@ -764,6 +796,7 @@ def train_model(
     max_grad_norm = float(config["training"]["max_grad_norm"])
     eval_steps = config["training"].get("eval_steps")
     log_token_stats = bool(config["training"].get("log_token_stats", False))
+    train_log_interval = int(config["training"].get("train_log_interval", 100))
     loss_mode = str(config["training"].get("loss_mode", "cross_entropy"))
     label_smoothing = float(config["training"].get("label_smoothing", 0.0))
     lora_lr = float(config["training"].get("lora_learning_rate", lr))
@@ -900,14 +933,7 @@ def train_model(
             i = 0
             
         train_collate_fn.log_token_stats = log_token_stats
-        progress_bar = tqdm(
-            batch_iterator,
-            desc=f"Training Epoch {epoch + 1}/{epochs}",
-            total=len(train_loader),
-            initial=i,
-            disable=not is_main_process,
-        )
-        for batch in progress_bar:
+        for batch in batch_iterator:
             i += 1
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
 
@@ -928,13 +954,14 @@ def train_model(
 
             context = accelerator.accumulate(model) if accelerator is not None else torch.enable_grad()
             with context:
-                outputs = model(
-                    input_ids=input_ids_batch,
-                    pixel_values=pixel_values_batch,
-                    labels=label_ids_batch,
-                    image_flags=image_flags_batch,
-                    return_dict=True,
-                )
+                with suppress_runtime_noise():
+                    outputs = model(
+                        input_ids=input_ids_batch,
+                        pixel_values=pixel_values_batch,
+                        labels=label_ids_batch,
+                        image_flags=image_flags_batch,
+                        return_dict=True,
+                    )
                 if getattr(unwrapped_model, "qformer_enabled", False):
                     unwrapped_model.clear_qformer_text()
                 if getattr(unwrapped_model, "trajectory_enabled", False):
@@ -954,8 +981,6 @@ def train_model(
 
                 gathered_loss = accelerator.gather(raw_loss.detach().reshape(1)) if accelerator is not None else raw_loss.detach().reshape(1)
                 mean_loss = float(gathered_loss.mean().item())
-                if is_main_process:
-                    progress_bar.set_postfix(loss=f"{mean_loss:.4f}")
                 accumulated_loss_for_log += mean_loss
 
                 should_step = accelerator.sync_gradients if accelerator is not None else (i % accum_steps == 0)
@@ -969,8 +994,18 @@ def train_model(
                     global_step = i // accum_steps
                     if is_main_process:
                         metrics["train_loss"].append({"step": global_step, "epoch": epoch + 1, "loss": round(avg_loss, 6)})
-                        if global_step % 50 == 0:
-                            logger.info(f"Step {global_step} | Avg Loss: {avg_loss:.4f}")
+                        if global_step % train_log_interval == 0:
+                            current_lr = lr_scheduler.get_last_lr()[0] if lr_scheduler is not None else lora_lr
+                            logger.info(
+                                "Train progress | epoch=%s/%s | batch=%s/%s | opt_step=%s | avg_loss=%.4f | lr=%.6g",
+                                epoch + 1,
+                                epochs,
+                                i,
+                                len(train_loader),
+                                global_step,
+                                avg_loss,
+                                current_lr,
+                            )
                             save_metrics(metrics)
                     accumulated_loss_for_log = 0.0
 

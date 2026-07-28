@@ -217,6 +217,15 @@ def test_train_source_runs_test_infer_after_each_epoch_checkpoint_save():
     assert "Pairs JSON saved at:" in source
 
 
+def test_train_source_uses_interval_logging_and_suppresses_runtime_noise():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "def suppress_runtime_noise()" in source
+    assert "dynamic ViT batch size:" in source
+    assert 'train_log_interval = int(config["training"].get("train_log_interval", 100))' in source
+    assert "Train progress | epoch=%s/%s | batch=%s/%s | opt_step=%s | avg_loss=%.4f | lr=%.6g" in source
+
+
 def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():
     source = (ROOT / "wad_dataset.py").read_text(encoding="utf-8")
 
