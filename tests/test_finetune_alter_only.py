@@ -150,3 +150,53 @@ def test_cls_case3_notebook_keeps_pretrain_checkpoint_surface():
     assert 'PRETRAIN_CHECKPOINT = ""' in train_cell
     assert 'cmd += ["--pretrain_checkpoint", PRETRAIN_CHECKPOINT]' in train_cell
     assert '"--split", "test_alter"' in infer_cell
+
+
+def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat_bestshot_bf16_2gpu.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["trajectory"]["fusion_mode"] == "concat"
+    assert cfg["trajectory"]["d_traj"] == 384
+    assert cfg["trajectory"]["num_layers"] == 4
+    assert cfg["trajectory"]["ffn_dim"] == 768
+    assert cfg["trajectory"]["dropout"] == pytest.approx(0.10)
+    assert cfg["data"]["alter_only"] is True
+    assert cfg["data"]["response_format"] == "direct_text"
+    assert cfg["model"]["quantization"]["enabled"] is False
+    assert cfg["training"]["bf16"] is True
+    assert cfg["training"]["fp16"] is False
+    assert cfg["training"]["use_accelerate"] is True
+    assert cfg["training"]["batch_size"] == 2
+    assert cfg["training"]["gradient_accumulation_steps"] == 8
+    assert cfg["hardware"]["num_workers"] == 4
+    assert cfg["hardware"]["pin_memory"] is True
+    assert cfg["hardware"]["persistent_workers"] is True
+    assert cfg["hardware"]["prefetch_factor"] == 2
+
+
+def test_concat_bestshot_bf16_2gpu_notebook_keeps_pretrain_checkpoint_and_uses_accelerate():
+    notebook = json.loads((ROOT / "run_qformer_concat_bestshot_bf16_2gpu.ipynb").read_text(encoding="utf-8"))
+    cell0 = "".join(notebook["cells"][0]["source"])
+    train_cell = "".join(notebook["cells"][7]["source"])
+    infer_cell = "".join(notebook["cells"][8]["source"])
+
+    assert 'TARGET_BRANCH = "feature/trajectory-pretrain-qformer-concat-bestshot-bf16"' in cell0
+    assert 'CONFIG_PATH = "internvl_config_traj_concat_bestshot_bf16_2gpu.yaml"' in cell0
+    assert 'TRAIN_CHECKPOINT = ""' in train_cell
+    assert 'PRETRAIN_CHECKPOINT = ""' in train_cell
+    assert 'cmd += ["--pretrain_checkpoint", PRETRAIN_CHECKPOINT]' in train_cell
+    assert 'accelerate", "launch", "--num_processes", "2"' in train_cell
+    assert '"--split", "test_alter"' in infer_cell
+    assert 'EVAL_ALL_EPOCHS = True' in infer_cell
+    assert "glob('epoch_*')" in infer_cell
+    assert "Pairs JSON:" in infer_cell
+
+
+def test_train_source_contains_distributed_runtime_hooks_for_bestshot_concat():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "from accelerate import Accelerator" in source
+    assert 'os.environ.get("LOCAL_RANK"' in source
+    assert 'config["training"].get("use_accelerate", False)' in source
+    assert "accelerator.prepare(" in source
+    assert "accelerator.is_main_process" in source

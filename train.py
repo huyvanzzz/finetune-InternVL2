@@ -6,11 +6,14 @@ import datetime
 import re
 import random
 import sys
+from typing import Dict
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import yaml
+from accelerate import Accelerator
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
@@ -49,15 +52,52 @@ def get_config_path_from_argv(default="internvl_config.yaml"):
 
 
 CONFIG_PATH = get_config_path_from_argv()
+logger = None
 
-with open(CONFIG_PATH, "r") as f:
-    config = yaml.safe_load(f)
 
-base_out_dir = config["training"]["output_dir"]
-output_dir = f'{base_out_dir}/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
-os.makedirs(output_dir, exist_ok=True)
-init_logger(output_dir)
-logger = get_logger()
+class SilentLogger:
+    def info(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+
+def load_config(config_path: str) -> Dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def build_output_dir(config: Dict) -> str:
+    base_out_dir = config["training"]["output_dir"]
+    return f'{base_out_dir}/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}/'
+
+
+def broadcast_output_dir(output_dir: str | None, accelerator: Accelerator | None) -> str:
+    if accelerator is None or accelerator.num_processes == 1:
+        assert output_dir is not None
+        return output_dir
+    payload = [output_dir]
+    dist.broadcast_object_list(payload, src=0)
+    assert payload[0] is not None
+    return payload[0]
+
+
+def build_dataloader_kwargs(config: Dict) -> Dict:
+    hardware_cfg = config.get("hardware", {})
+    num_workers = int(hardware_cfg.get("num_workers", 0))
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": bool(hardware_cfg.get("pin_memory", False)),
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = bool(hardware_cfg.get("persistent_workers", False))
+        if "prefetch_factor" in hardware_cfg:
+            kwargs["prefetch_factor"] = int(hardware_cfg["prefetch_factor"])
+    return kwargs
 
 from wad_dataset import build_dataset
 from model.conversation import get_conv_template
@@ -428,27 +468,32 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
-def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smoothing: float):
+def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smoothing: float, device, accelerator=None):
     model.eval()
     with torch.no_grad():
-        total_eval_loss = 0
+        total_eval_loss = 0.0
         total_eval_batchs = 0
         eval_desc = f"Eval @ step {step} | epoch {epoch + 1}/{epochs}"
-        for batch in tqdm(val_loader, desc=eval_desc, leave=False):
+        for batch in tqdm(
+            val_loader,
+            desc=eval_desc,
+            leave=False,
+            disable=accelerator is not None and not accelerator.is_main_process,
+        ):
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
+            input_ids_batch = input_ids_batch.to(device)
+            label_ids_batch = label_ids_batch.to(device)
+            attention_mask_batch = attention_mask_batch.to(device)
+            pixel_values_batch = pixel_values_batch.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
+            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long, device=device)
             if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
+                model.set_qformer_text(qformer_inputs[0].to(device), qformer_inputs[1].to(device))
             if getattr(model, "trajectory_enabled", False) and trajectory_inputs is not None:
                 model.set_trajectory_inputs(
-                    trajectory_inputs[0].cuda(),
-                    trajectory_inputs[1].cuda(),
-                    trajectory_inputs[2].cuda(),
-                    trajectory_inputs[3].cuda(),
+                    trajectory_inputs[0].to(device),
+                    trajectory_inputs[1].to(device),
+                    trajectory_inputs[2].to(device),
+                    trajectory_inputs[3].to(device),
                 )
 
             outputs = model(
@@ -468,12 +513,17 @@ def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smo
                 loss_mode=loss_mode,
                 label_smoothing=label_smoothing,
             )
-            total_eval_loss += loss.item()
+            if accelerator is not None:
+                gathered_loss = accelerator.gather(loss.detach().reshape(1))
+                total_eval_loss += float(gathered_loss.mean().item())
+            else:
+                total_eval_loss += loss.item()
             total_eval_batchs += 1
             if total_eval_batchs == 200:
                 break
         avg_eval_loss = total_eval_loss / total_eval_batchs if total_eval_batchs > 0 else float("nan")
-        logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {avg_eval_loss:.4f}")
+        if accelerator is None or accelerator.is_main_process:
+            logger.info(f"Validation loss after {step} batches training in epoch {epoch + 1}/{epochs}: {avg_eval_loss:.4f}")
     model.train()
     if getattr(model, "qformer_enabled", False):
         model.qformer.eval()
@@ -481,7 +531,19 @@ def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smo
     return avg_eval_loss
 
 
-def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuffle, config, output_dir, resume_dir=None, start_epoch=0, start_step=0):
+def train_model(
+    model,
+    tokenizer,
+    train_loader,
+    val_loader,
+    val_loader_with_shuffle,
+    config,
+    output_dir,
+    accelerator=None,
+    resume_dir=None,
+    start_epoch=0,
+    start_step=0,
+):
     epochs = config["training"]["num_epochs"]
     lr = float(config["training"]["learning_rate"])
     accum_steps = config["training"]["gradient_accumulation_steps"]
@@ -496,6 +558,8 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     bridge_lr = float(config["training"].get("bridge_learning_rate", config["training"].get("proj_learning_rate", lr)))
     trajectory_lr = float(config["training"].get("trajectory_learning_rate", config["training"].get("proj_learning_rate", lr)))
     metrics_path = os.path.join(output_dir, "metrics.json")
+    is_main_process = accelerator is None or accelerator.is_main_process
+    device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def save_metrics(metrics: dict):
         import json
@@ -504,19 +568,20 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
 
     metrics = {"train_loss": [], "val_loss": [], "epoch_summary": []}
 
-    logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
-    logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    logger.info(
-        "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s, "
-        "lora_lr=%s, bridge_lr=%s, trajectory_lr=%s",
-        loss_mode,
-        label_smoothing,
-        accum_steps,
-        weight_decay,
-        lora_lr,
-        bridge_lr,
-        trajectory_lr,
-    )
+    if is_main_process:
+        logger.info(f"Total params: {sum(p.numel() for p in model.parameters())}")
+        logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+        logger.info(
+            "Training config: loss_mode=%s, label_smoothing=%.3f, accum_steps=%s, weight_decay=%s, "
+            "lora_lr=%s, bridge_lr=%s, trajectory_lr=%s",
+            loss_mode,
+            label_smoothing,
+            accum_steps,
+            weight_decay,
+            lora_lr,
+            bridge_lr,
+            trajectory_lr,
+        )
 
     optimizer_groups = build_optimizer_param_groups(
         model,
@@ -524,13 +589,14 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         bridge_lr=bridge_lr,
         trajectory_lr=trajectory_lr,
     )
-    logger.info(
-        "Param groups | %s",
-        " | ".join(
-            f"{group['name']}: {sum(p.numel() for p in group['params']):,} params @ lr={group['lr']}"
-            for group in optimizer_groups
-        ),
-    )
+    if is_main_process:
+        logger.info(
+            "Param groups | %s",
+            " | ".join(
+                f"{group['name']}: {sum(p.numel() for p in group['params']):,} params @ lr={group['lr']}"
+                for group in optimizer_groups
+            ),
+        )
 
     optimizer = AdamW(
         optimizer_groups,
@@ -539,6 +605,7 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
     )
     enforce_safe_optimizer_param_groups(optimizer)
     save_steps = config["training"].get("save_steps")
+    train_collate_fn = train_loader.collate_fn
 
     total_training_steps = (len(train_loader) * epochs) // accum_steps
     lr_scheduler = get_cosine_schedule_with_warmup(
@@ -546,17 +613,29 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
         num_warmup_steps=warmup_steps,
         num_training_steps=total_training_steps,
     )
+    if accelerator is not None:
+        model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+            model,
+            optimizer,
+            train_loader,
+            val_loader,
+            lr_scheduler,
+        )
+    unwrapped_model = accelerator.unwrap_model(model) if accelerator is not None else model
 
     if resume_dir and os.path.exists(resume_dir):
-        logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
-        if getattr(model, "qformer_enabled", False):
-            load_qformer_bridge(model, resume_dir, strict=True)
-            align_qformer_bridge_runtime(model)
-            logger.info("Loaded Q-Former bridge states successfully!")
-        if getattr(model, "trajectory_enabled", False):
-            load_trajectory_branch(model, resume_dir, strict=True)
-            align_qformer_bridge_runtime(model)
-            logger.info("Loaded trajectory branch states successfully!")
+        if is_main_process:
+            logger.info(f"Resuming training from {resume_dir} | Epoch: {start_epoch+1}, Step: {start_step}")
+        if getattr(unwrapped_model, "qformer_enabled", False):
+            load_qformer_bridge(unwrapped_model, resume_dir, strict=True)
+            align_qformer_bridge_runtime(unwrapped_model)
+            if is_main_process:
+                logger.info("Loaded Q-Former bridge states successfully!")
+        if getattr(unwrapped_model, "trajectory_enabled", False):
+            load_trajectory_branch(unwrapped_model, resume_dir, strict=True)
+            align_qformer_bridge_runtime(unwrapped_model)
+            if is_main_process:
+                logger.info("Loaded trajectory branch states successfully!")
 
         opt_path = os.path.join(resume_dir, "optimizer.pt")
         sch_path = os.path.join(resume_dir, "scheduler.pt")
@@ -578,107 +657,133 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
             if moved:
                 logger.info("Moved %s optimizer state tensors to parameter devices after load.", moved)
             remaining_cpu_tensors = count_optimizer_state_tensors_on_cpu(optimizer)
-            logger.info("Optimizer state CPU tensor count after load: %s", remaining_cpu_tensors)
-            logger.info("Loaded Optimizer and Scheduler states successfully!")
+            if is_main_process:
+                logger.info("Optimizer state CPU tensor count after load: %s", remaining_cpu_tensors)
+                logger.info("Loaded Optimizer and Scheduler states successfully!")
         else:
-            logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
+            if is_main_process:
+                logger.warning("No Optimizer/Scheduler states found in checkpoint. Starting with fresh states.")
 
     for epoch in range(start_epoch, epochs):
         model.train()
-        if getattr(model, "qformer_enabled", False):
-            model.qformer.eval()
-            model.mlp1.eval()
+        if getattr(unwrapped_model, "qformer_enabled", False):
+            unwrapped_model.qformer.eval()
+            unwrapped_model.mlp1.eval()
         optimizer.zero_grad()
 
         accumulated_loss_for_log = 0.0
         set_seed(42)
-        logger.info("Epoch seed fixed | epoch=%s | seed=42", epoch + 1)
+        if is_main_process:
+            logger.info("Epoch seed fixed | epoch=%s | seed=42", epoch + 1)
         batch_iterator = iter(train_loader)
-        train_loader.collate_fn.log_token_stats = False
+        train_collate_fn.log_token_stats = False
 
         if epoch == start_epoch and start_step > 0:
-            logger.info(f" Skipping {start_step} batches to resume state...")
-            for _ in tqdm(range(start_step), desc="Skipping to resume point", leave=False):
+            if is_main_process:
+                logger.info(f" Skipping {start_step} batches to resume state...")
+            for _ in tqdm(range(start_step), desc="Skipping to resume point", leave=False, disable=not is_main_process):
                 next(batch_iterator)
             i = start_step
         else:
             i = 0
             
-        train_loader.collate_fn.log_token_stats = log_token_stats
-        progress_bar = tqdm(batch_iterator, desc=f"Training Epoch {epoch + 1}/{epochs}", total=len(train_loader), initial=i)
+        train_collate_fn.log_token_stats = log_token_stats
+        progress_bar = tqdm(
+            batch_iterator,
+            desc=f"Training Epoch {epoch + 1}/{epochs}",
+            total=len(train_loader),
+            initial=i,
+            disable=not is_main_process,
+        )
         for batch in progress_bar:
             i += 1
             input_ids_batch, label_ids_batch, attention_mask_batch, pixel_values_batch, qformer_inputs, trajectory_inputs, _ = batch
 
-            input_ids_batch = input_ids_batch.cuda()
-            label_ids_batch = label_ids_batch.cuda()
-            attention_mask_batch = attention_mask_batch.cuda()
-            pixel_values_batch = pixel_values_batch.to(torch.bfloat16).cuda()
-            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long).cuda()
-            if getattr(model, "qformer_enabled", False) and qformer_inputs is not None:
-                model.set_qformer_text(qformer_inputs[0].cuda(), qformer_inputs[1].cuda())
-            if getattr(model, "trajectory_enabled", False) and trajectory_inputs is not None:
-                model.set_trajectory_inputs(
-                    trajectory_inputs[0].cuda(),
-                    trajectory_inputs[1].cuda(),
-                    trajectory_inputs[2].cuda(),
-                    trajectory_inputs[3].cuda(),
+            input_ids_batch = input_ids_batch.to(device)
+            label_ids_batch = label_ids_batch.to(device)
+            attention_mask_batch = attention_mask_batch.to(device)
+            pixel_values_batch = pixel_values_batch.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
+            image_flags_batch = torch.ones((pixel_values_batch.shape[0], 1), dtype=torch.long, device=device)
+            if getattr(unwrapped_model, "qformer_enabled", False) and qformer_inputs is not None:
+                unwrapped_model.set_qformer_text(qformer_inputs[0].to(device), qformer_inputs[1].to(device))
+            if getattr(unwrapped_model, "trajectory_enabled", False) and trajectory_inputs is not None:
+                unwrapped_model.set_trajectory_inputs(
+                    trajectory_inputs[0].to(device),
+                    trajectory_inputs[1].to(device),
+                    trajectory_inputs[2].to(device),
+                    trajectory_inputs[3].to(device),
                 )
 
-            outputs = model(
-                input_ids=input_ids_batch,
-                pixel_values=pixel_values_batch,
-                labels=label_ids_batch,
-                image_flags=image_flags_batch,
-                return_dict=True,
-            )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
-            if getattr(model, "trajectory_enabled", False):
-                model.clear_trajectory_inputs()
+            context = accelerator.accumulate(model) if accelerator is not None else torch.enable_grad()
+            with context:
+                outputs = model(
+                    input_ids=input_ids_batch,
+                    pixel_values=pixel_values_batch,
+                    labels=label_ids_batch,
+                    image_flags=image_flags_batch,
+                    return_dict=True,
+                )
+                if getattr(unwrapped_model, "qformer_enabled", False):
+                    unwrapped_model.clear_qformer_text()
+                if getattr(unwrapped_model, "trajectory_enabled", False):
+                    unwrapped_model.clear_trajectory_inputs()
 
-            raw_loss = compute_sequence_loss(
-                logits=outputs.logits,
-                labels=label_ids_batch,
-                loss_mode=loss_mode,
-                label_smoothing=label_smoothing,
-            )
-            loss = raw_loss / accum_steps
-            progress_bar.set_postfix(loss=f"{raw_loss.item():.4f}")
-            loss.backward()
+                raw_loss = compute_sequence_loss(
+                    logits=outputs.logits,
+                    labels=label_ids_batch,
+                    loss_mode=loss_mode,
+                    label_smoothing=label_smoothing,
+                )
+                loss = raw_loss / accum_steps
+                if accelerator is not None:
+                    accelerator.backward(loss)
+                else:
+                    loss.backward()
 
-            accumulated_loss_for_log += raw_loss.item()
+                gathered_loss = accelerator.gather(raw_loss.detach().reshape(1)) if accelerator is not None else raw_loss.detach().reshape(1)
+                mean_loss = float(gathered_loss.mean().item())
+                if is_main_process:
+                    progress_bar.set_postfix(loss=f"{mean_loss:.4f}")
+                accumulated_loss_for_log += mean_loss
 
-            if i % accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                should_step = accelerator.sync_gradients if accelerator is not None else (i % accum_steps == 0)
+                if should_step:
+                    if accelerator is not None:
+                        accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
-                avg_loss = accumulated_loss_for_log / accum_steps
-                global_step = i // accum_steps
-                metrics["train_loss"].append({"step": global_step, "epoch": epoch + 1, "loss": round(avg_loss, 6)})
-                if global_step % 50 == 0:
-                    logger.info(f"Step {global_step} | Avg Loss: {avg_loss:.4f}")
-                    save_metrics(metrics)
-                accumulated_loss_for_log = 0.0
+                    avg_loss = accumulated_loss_for_log / accum_steps
+                    global_step = i // accum_steps
+                    if is_main_process:
+                        metrics["train_loss"].append({"step": global_step, "epoch": epoch + 1, "loss": round(avg_loss, 6)})
+                        if global_step % 50 == 0:
+                            logger.info(f"Step {global_step} | Avg Loss: {avg_loss:.4f}")
+                            save_metrics(metrics)
+                    accumulated_loss_for_log = 0.0
 
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
             if eval_steps and i % eval_steps == 0:
-                logger.info(f"Running evaluation at step {i}...")
-                val_loss = eval_model(model, val_loader, i, epoch, epochs, loss_mode, label_smoothing)
-                if val_loss is not None:
+                if is_main_process:
+                    logger.info(f"Running evaluation at step {i}...")
+                val_loss = eval_model(model, val_loader, i, epoch, epochs, loss_mode, label_smoothing, device, accelerator=accelerator)
+                if val_loss is not None and is_main_process:
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
 
-            if save_steps and i % save_steps == 0:
+            if save_steps and i % save_steps == 0 and is_main_process:
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
                 step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
                 os.makedirs(step_save_dir, exist_ok=True)
                 logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
 
-                model.language_model.save_pretrained(step_save_dir)
-                save_qformer_bridge(model, step_save_dir)
-                save_trajectory_branch(model, step_save_dir)
+                unwrapped_model.language_model.save_pretrained(step_save_dir)
+                save_qformer_bridge(unwrapped_model, step_save_dir)
+                save_trajectory_branch(unwrapped_model, step_save_dir)
                 tokenizer.save_pretrained(step_save_dir)
                 optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
                 if converted:
@@ -688,52 +793,100 @@ def train_model(model, tokenizer, train_loader, val_loader, val_loader_with_shuf
                 torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
                 torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
 
-        epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
-        os.makedirs(epoch_save_dir, exist_ok=True)
-        logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
-        model.language_model.save_pretrained(epoch_save_dir)
-        save_qformer_bridge(model, epoch_save_dir)
-        save_trajectory_branch(model, epoch_save_dir)
-        tokenizer.save_pretrained(epoch_save_dir)
-        optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
-        if converted:
-            logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
-        if overridden_groups:
-            logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
-        torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
-        torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
 
-        epoch_train = [e["loss"] for e in metrics["train_loss"] if e["epoch"] == epoch + 1]
-        avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
-        metrics["epoch_summary"].append({"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6)})
-        logger.info(f"Epoch {epoch+1} summary | avg_train_loss={avg_epoch_loss:.4f}")
-        save_metrics(metrics)
+        if is_main_process:
+            epoch_save_dir = f"{output_dir}/epoch_{epoch+1}/"
+            os.makedirs(epoch_save_dir, exist_ok=True)
+            logger.info(f"Saving model and tokenizer for epoch {epoch+1} to {epoch_save_dir}")
+            unwrapped_model.language_model.save_pretrained(epoch_save_dir)
+            save_qformer_bridge(unwrapped_model, epoch_save_dir)
+            save_trajectory_branch(unwrapped_model, epoch_save_dir)
+            tokenizer.save_pretrained(epoch_save_dir)
+            optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
+            if converted:
+                logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+            if overridden_groups:
+                logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
+            torch.save(optimizer_state_dict, os.path.join(epoch_save_dir, "optimizer.pt"))
+            torch.save(lr_scheduler.state_dict(), os.path.join(epoch_save_dir, "scheduler.pt"))
+
+            epoch_train = [e["loss"] for e in metrics["train_loss"] if e["epoch"] == epoch + 1]
+            avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
+            metrics["epoch_summary"].append({"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6)})
+            logger.info(f"Epoch {epoch+1} summary | avg_train_loss={avg_epoch_loss:.4f}")
+            save_metrics(metrics)
 
 
 if __name__ == "__main__":
     args = parse_args()
+    config = load_config(args.config)
+    use_accelerate = bool(config["training"].get("use_accelerate", False))
+    accum_steps = int(config["training"]["gradient_accumulation_steps"])
+    accelerator = Accelerator(gradient_accumulation_steps=accum_steps) if use_accelerate else None
+    is_main_process = accelerator is None or accelerator.is_main_process
+    world_size = accelerator.num_processes if accelerator is not None else 1
+    local_rank = accelerator.local_process_index if accelerator is not None else 0
+    distributed = world_size > 1
+
+    output_dir = build_output_dir(config) if is_main_process else None
+    output_dir = broadcast_output_dir(output_dir, accelerator)
+    if is_main_process:
+        os.makedirs(output_dir, exist_ok=True)
+        init_logger(output_dir)
+        logger = get_logger()
+    else:
+        logger = SilentLogger()
+
     if args.checkpoint and args.pretrain_checkpoint:
         raise ValueError("Use either --checkpoint for finetune resume or --pretrain_checkpoint for pretrain preload, not both.")
     resume_dir, start_epoch, start_step = resolve_resume_config(args, config)
     pretrain_checkpoint_dir = resolve_checkpoint_path(args.pretrain_checkpoint) if args.pretrain_checkpoint else None
     model_name_or_path = config["model"]["name"]
     batch_size = config["training"]["batch_size"]
+    quant_enabled = bool(config["model"]["quantization"]["enabled"])
+    quantization_config = None
+    if quant_enabled:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16 if config["model"]["quantization"]["compute_dtype"] == "bfloat16" else torch.float16,
+            bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
+            bnb_4bit_quant_type=config["model"]["quantization"]["type"],
+        )
 
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=config["model"]["quantization"]["enabled"],
-        bnb_4bit_compute_dtype=torch.bfloat16 if config["model"]["quantization"]["compute_dtype"] == "bfloat16" else torch.float16,
-        bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
-        bnb_4bit_quant_type=config["model"]["quantization"]["type"],
-    )
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": config["model"]["trust_remote_code"],
+    }
+    if quantization_config is not None:
+        model_kwargs["quantization_config"] = quantization_config
+        if distributed and torch.cuda.is_available():
+            model_kwargs["device_map"] = {"": local_rank}
 
-    logger.info(f"Loading model {model_name_or_path} in 4-bit...")
-    model = AutoModel.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        low_cpu_mem_usage=True,
-        trust_remote_code=config["model"]["trust_remote_code"],
-    )
+    if is_main_process:
+        logger.info(
+            "Distributed runtime | distributed=%s | world_size=%s | local_rank=%s | quantization_enabled=%s | bf16=%s",
+            distributed,
+            world_size,
+            local_rank,
+            quant_enabled,
+            bool(config["training"].get("bf16", False)),
+        )
+        logger.info(
+            "Concat best-shot runtime | trajectory_mode=%s | alter_only=%s | seed=%s | lora_r=%s | batch_size=%s | accum_steps=%s | global_batch=%s",
+            config["trajectory"]["fusion_mode"],
+            bool(config["data"].get("alter_only", False)),
+            config["data"].get("seed", 42),
+            config["model"]["lora"]["r"],
+            batch_size,
+            accum_steps,
+            int(batch_size) * int(accum_steps) * world_size,
+        )
+
+    logger.info("Loading model %s | quantization_enabled=%s", model_name_or_path, quant_enabled)
+    model = AutoModel.from_pretrained(model_name_or_path, **model_kwargs)
 
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
@@ -750,7 +903,8 @@ if __name__ == "__main__":
         align_qformer_bridge_runtime(model)
 
     logger.info("Applying LoRA...")
-    model.language_model = prepare_model_for_kbit_training(model.language_model)
+    if quant_enabled:
+        model.language_model = prepare_model_for_kbit_training(model.language_model)
 
     if hasattr(model.language_model, "get_input_embeddings"):
         model.language_model.get_input_embeddings().to(torch.bfloat16)
@@ -776,7 +930,8 @@ if __name__ == "__main__":
 
     apply_mode_gated_trajectory_trainability(model, logger)
 
-    model.language_model.print_trainable_parameters()
+    if is_main_process:
+        model.language_model.print_trainable_parameters()
     model.train()
 
     logger.info("Building dataset...")
@@ -787,31 +942,46 @@ if __name__ == "__main__":
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
     collate_fn_wrapper.alter_only = bool(config["data"].get("alter_only", False))
 
-    logger.info(
-        "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s | loss_mode=%s | label_smoothing=%.3f",
-        getattr(model, "qformer_enabled", False),
-        getattr(model, "trajectory_enabled", False),
-        getattr(model, "trajectory_fusion_mode", "disabled"),
-        getattr(model, "trajectory_source_file", "n/a"),
-        getattr(model, "num_image_token", "unknown"),
-        getattr(model, "qformer_num_query_tokens", getattr(model, "num_image_token", "unknown")),
-        collate_fn_wrapper.log_token_stats,
-        collate_fn_wrapper.token_log_remaining,
-        collate_fn_wrapper.alter_only,
-        config["training"].get("loss_mode", "cross_entropy"),
-        float(config["training"].get("label_smoothing", 0.0)),
-    )
+    if is_main_process:
+        logger.info(
+            "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s | loss_mode=%s | label_smoothing=%.3f",
+            getattr(model, "qformer_enabled", False),
+            getattr(model, "trajectory_enabled", False),
+            getattr(model, "trajectory_fusion_mode", "disabled"),
+            getattr(model, "trajectory_source_file", "n/a"),
+            getattr(model, "num_image_token", "unknown"),
+            getattr(model, "qformer_num_query_tokens", getattr(model, "num_image_token", "unknown")),
+            collate_fn_wrapper.log_token_stats,
+            collate_fn_wrapper.token_log_remaining,
+            collate_fn_wrapper.alter_only,
+            config["training"].get("loss_mode", "cross_entropy"),
+            float(config["training"].get("label_smoothing", 0.0)),
+        )
+
+    dataloader_kwargs = build_dataloader_kwargs(config)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=True
+        train_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn_wrapper,
+        shuffle=True,
+        **dataloader_kwargs,
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, collate_fn=collate_fn_wrapper, shuffle=False
+        val_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn_wrapper,
+        shuffle=False,
+        **dataloader_kwargs,
     )
 
     val_loader_with_shuffle = DataLoader(
-        val_dataset, batch_size=1, collate_fn=collate_fn_wrapper, shuffle=True
+        val_dataset,
+        batch_size=1,
+        collate_fn=collate_fn_wrapper,
+        shuffle=True,
+        **dataloader_kwargs,
     )
 
     logger.info("STARTING TRAINING...")
@@ -823,6 +993,7 @@ if __name__ == "__main__":
         val_loader_with_shuffle=val_loader_with_shuffle,
         config=config,
         output_dir=output_dir,
+        accelerator=accelerator,
         resume_dir=resume_dir,
         start_epoch=start_epoch,
         start_step=start_step,
