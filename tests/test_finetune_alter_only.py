@@ -237,6 +237,37 @@ def test_train_source_supports_separate_val_and_test_batch_sizes_with_accelerate
     assert "build_test_alter_loader(config, batch_size=test_batch_size)" in source
 
 
+def test_train_source_prepares_epoch_test_runtime_once_and_reuses_it():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "def prepare_epoch_test_runtime(" in source
+    assert "epoch_test_runtime=None" in source
+    assert "test_loader = epoch_test_runtime[\"test_loader\"]" in source
+    assert "evaluator = epoch_test_runtime[\"evaluator\"]" in source
+
+
+def test_train_and_test_infer_sources_use_batched_generation_helpers():
+    train_source = (ROOT / "train.py").read_text(encoding="utf-8")
+    infer_source = (ROOT / "scripts" / "test_infer.py").read_text(encoding="utf-8")
+
+    assert "def run_model_batch_chat_for_eval(" in train_source
+    assert "responses = run_model_batch_chat_for_eval(" in train_source
+    assert "for sample in batch:" not in train_source.split("def run_epoch_test_infer(", 1)[1].split("def eval_model(", 1)[0]
+
+    assert "def run_model_batch_chat(" in infer_source
+    assert "responses = run_model_batch_chat(" in infer_source
+    assert "for sample in batch:" not in infer_source.split("with torch.no_grad():", 1)[1].split("# 5. Compute Metrics", 1)[0]
+
+
+def test_test_infer_uses_configurable_batch_size_and_not_hardcoded_one():
+    source = (ROOT / "scripts" / "test_infer.py").read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--batch_size"' in source
+    assert 'test_batch_size = int(args.batch_size or config.get("evaluation", {}).get("batch_size", 1))' in source
+    assert "batch_size=test_batch_size" in source
+    assert "for batch in test_loader:" in source
+
+
 def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():
     source = (ROOT / "wad_dataset.py").read_text(encoding="utf-8")
 

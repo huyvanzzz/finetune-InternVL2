@@ -6,7 +6,6 @@ import argparse
 import pickle
 from huggingface_hub import snapshot_download
 from collections import defaultdict
-from tqdm import tqdm
 from torch.utils.data import DataLoader
 from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
@@ -45,35 +44,88 @@ def align_language_model_devices(model):
     print(f"[DEVICE CHECK] input_embeddings device: {embedding_device}", flush=True)
 
 
-def run_model_chat(model, tokenizer, pixel_values, question, generation_config):
-    num_patches_list = [pixel_values.shape[0]] if pixel_values is not None else []
-    template = get_conv_template(model.template)
-    template.system_message = model.system_message
-    eos_token_id = tokenizer.convert_tokens_to_ids(template.sep)
-    template.append_message(template.roles[0], question)
-    template.append_message(template.roles[1], None)
-    query = template.get_prompt()
+def run_model_batch_chat(model, tokenizer, batch, generation_config, device):
+    if not batch:
+        return []
 
-    for num_patches in num_patches_list:
-        image_tokens = "<img>" + "<IMG_CONTEXT>" * model.num_image_token * num_patches + "</img>"
+    pixel_values_chunks = []
+    questions = []
+    num_patches_list = []
+    qformer_texts = []
+    trajectory_label_ids = []
+    trajectory_direction_ids = []
+    trajectory_numeric_feats = []
+    trajectory_object_mask = []
+    pixel_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+
+    for sample in batch:
+        pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
+        pixel_values = pixel_values.to(dtype=pixel_dtype, device=device)
+        pixel_values_chunks.append(pixel_values)
+        num_patches = int(pixel_values.shape[0])
+        num_patches_list.append(num_patches)
+        question = str(sample["question"])
+        questions.append(question)
+
+        if getattr(model, "qformer_enabled", False):
+            qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+            qformer_texts.extend([qformer_text] * num_patches)
+
+        if getattr(model, "trajectory_enabled", False):
+            trajectory_label_ids.append(sample["trajectory_label_ids"].unsqueeze(0).repeat(num_patches, 1))
+            trajectory_direction_ids.append(sample["trajectory_direction_ids"].unsqueeze(0).repeat(num_patches, 1))
+            trajectory_numeric_feats.append(sample["trajectory_numeric_feats"].unsqueeze(0).repeat(num_patches, 1, 1))
+            trajectory_object_mask.append(sample["trajectory_object_mask"].unsqueeze(0).repeat(num_patches, 1))
+
+    pixel_values_batch = torch.cat(pixel_values_chunks, dim=0)
+
+    if getattr(model, "qformer_enabled", False):
+        q_ids, q_mask = model.encode_qformer_texts(qformer_texts, device=device)
+        model.set_qformer_text(q_ids, q_mask)
+    if getattr(model, "trajectory_enabled", False):
+        model.set_trajectory_inputs(
+            torch.cat(trajectory_label_ids, dim=0).to(device),
+            torch.cat(trajectory_direction_ids, dim=0).to(device),
+            torch.cat(trajectory_numeric_feats, dim=0).to(device),
+            torch.cat(trajectory_object_mask, dim=0).to(device),
+        )
+
+    queries = []
+    template = None
+    for question, num_patches in zip(questions, num_patches_list):
+        template = get_conv_template(model.template)
+        template.system_message = model.system_message
+        template.append_message(template.roles[0], question)
+        template.append_message(template.roles[1], None)
+        query = template.get_prompt()
+        image_tokens = "<img>" + IMG_CONTEXT_TOKEN * model.num_image_token * num_patches + "</img>"
         query = query.replace("<image>", image_tokens, 1)
+        queries.append(query)
 
-    model_inputs = tokenizer(query, return_tensors="pt")
+    tokenizer.padding_side = "left"
+    model_inputs = tokenizer(queries, return_tensors="pt", padding=True)
     embedding_device = model.language_model.get_input_embeddings().weight.device
     input_ids = model_inputs["input_ids"].to(embedding_device)
     attention_mask = model_inputs["attention_mask"].to(embedding_device)
+    eos_token_id = tokenizer.convert_tokens_to_ids(template.sep)
     generation_config = dict(generation_config)
     generation_config["eos_token_id"] = eos_token_id
     generation_config["pad_token_id"] = eos_token_id
-
     generation_output = model.generate(
-        pixel_values=pixel_values,
+        pixel_values=pixel_values_batch,
         input_ids=input_ids,
         attention_mask=attention_mask,
         **generation_config,
     )
-    response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
-    return response.split(template.sep)[0].strip()
+    responses = tokenizer.batch_decode(generation_output, skip_special_tokens=True)
+    responses = [response.split(template.sep)[0].strip() for response in responses]
+
+    if getattr(model, "qformer_enabled", False):
+        model.clear_qformer_text()
+    if getattr(model, "trajectory_enabled", False):
+        model.clear_trajectory_inputs()
+
+    return responses
 
 class TestCollaterFn:
     def __init__(self, tokenizer, model) -> None:
@@ -114,7 +166,8 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint dir hoặc HuggingFace Repo ID")
     parser.add_argument("--split", type=str, default="test_QA", choices=["test_QA", "test_alter", "val"])
     parser.add_argument("--output_file", type=str, default="results/eval_results.json")
-    parser.add_argument("--print_samples", type=int, default=5)
+    parser.add_argument("--print_samples", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=None)
     return parser.parse_args()
 
 def prepare_auxiliary_data(config):
@@ -250,10 +303,11 @@ def main():
         response_format=response_format,
     )
     
+    test_batch_size = int(args.batch_size or config.get("evaluation", {}).get("batch_size", 1))
     test_loader = DataLoader(
         test_dataset,
-        batch_size=1,
-        collate_fn=TestCollaterFn(tokenizer, model), 
+        batch_size=test_batch_size,
+        collate_fn=TestCollaterFn(tokenizer, model),
         shuffle=False
     )
 
@@ -265,14 +319,11 @@ def main():
     print("="*50)
 
     evaluator = VLMMetrics()
+    print(f"Test loader batch_size={test_batch_size}")
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_loader, desc="Testing")):
-            sample = batch[0]
-            pixel_values = torch.cat([torch.as_tensor(p) for p in sample['pixel_values']], dim=0).to(torch.bfloat16).cuda()
-            question = str(sample['question'])
-            ground_truth = str(sample['answer'])
-            
+        sample_counter = 0
+        for batch in test_loader:
             generation_config = dict(
                 max_new_tokens=512,
                 num_beams=3,
@@ -280,49 +331,35 @@ def main():
                 repetition_penalty=1.3,
                 early_stopping=True,
             )
-            
-            if getattr(model, "qformer_enabled", False):
-                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                q_ids, q_mask = model.encode_qformer_texts(
-                    [qformer_text] * pixel_values.shape[0],
-                    device=pixel_values.device,
-                )
-                model.set_qformer_text(q_ids, q_mask)
-            if getattr(model, "trajectory_enabled", False):
-                model.set_trajectory_inputs(
-                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
-                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                )
-            response = run_model_chat(model, tokenizer, pixel_values, question, generation_config)
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
-            if getattr(model, "trajectory_enabled", False):
-                model.clear_trajectory_inputs()
-            question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
-            response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
-            ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
-            
-            predictions.append(response)
-            references.append(ground_truth)
-            
-            if i < args.print_samples:
-                print(f"\n--- Sample {i+1} ---")
-                print(
-                    f"Token stats | Q: {question_token_count} | "
-                    f"Pred: {response_token_count} | GT: {ground_truth_token_count}"
-                )
-                print(f"Q: {question}")
-                print(f"Pred: {response}")
-                print(f"GT:   {ground_truth}")
-            
-            detailed_results.append({
-                "id": i,
-                "question": question,
-                "prediction": response,
-                "ground_truth": ground_truth
-            })
+            inference_device = next(model.language_model.get_input_embeddings().parameters()).device
+            responses = run_model_batch_chat(model, tokenizer, batch, generation_config, inference_device)
+            for sample, response in zip(batch, responses):
+                question = str(sample["question"])
+                ground_truth = str(sample["answer"])
+                question_token_count = len(tokenizer.encode(question, add_special_tokens=False))
+                response_token_count = len(tokenizer.encode(response, add_special_tokens=False))
+                ground_truth_token_count = len(tokenizer.encode(ground_truth, add_special_tokens=False))
+
+                predictions.append(response)
+                references.append(ground_truth)
+
+                if sample_counter < args.print_samples:
+                    print(f"\n--- Sample {sample_counter+1} ---")
+                    print(
+                        f"Token stats | Q: {question_token_count} | "
+                        f"Pred: {response_token_count} | GT: {ground_truth_token_count}"
+                    )
+                    print(f"Q: {question}")
+                    print(f"Pred: {response}")
+                    print(f"GT:   {ground_truth}")
+
+                detailed_results.append({
+                    "id": sample_counter,
+                    "question": question,
+                    "prediction": response,
+                    "ground_truth": ground_truth
+                })
+                sample_counter += 1
 
     # 5. Compute Metrics
     metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"
