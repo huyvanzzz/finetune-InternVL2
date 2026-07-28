@@ -24,7 +24,7 @@ model:
 
   lora:
     enabled: true
-    r: 16
+    r: 32
     alpha: 32
     dropout: 0.05
     target_modules:
