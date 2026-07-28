@@ -1298,6 +1298,9 @@ if __name__ == "__main__":
     collate_fn_wrapper.token_log_remaining = int(config["training"].get("token_log_batches", 0))
     collate_fn_wrapper.alter_only = bool(config["data"].get("alter_only", False))
 
+    dataloader_kwargs = build_dataloader_kwargs(config)
+    val_batch_size = int(config["training"].get("val_batch_size", batch_size))
+
     if is_main_process:
         logger.info(
             "Runtime check | qformer_enabled=%s | trajectory_enabled=%s | trajectory_mode=%s | trajectory_source=%s | num_image_token=%s | qformer_tokens=%s | log_token_stats=%s | token_log_batches=%s | alter_only=%s | loss_mode=%s | label_smoothing=%.3f",
@@ -1319,9 +1322,6 @@ if __name__ == "__main__":
             int(config.get("evaluation", {}).get("batch_size", 1)),
             distributed,
         )
-
-    dataloader_kwargs = build_dataloader_kwargs(config)
-    val_batch_size = int(config["training"].get("val_batch_size", batch_size))
 
     train_loader = DataLoader(
         train_dataset,
