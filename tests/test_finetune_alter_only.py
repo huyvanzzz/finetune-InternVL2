@@ -164,6 +164,7 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["data"]["response_format"] == "direct_text"
     assert cfg["model"]["lora"]["r"] == 32
     assert cfg["model"]["quantization"]["enabled"] is False
+    assert cfg["model"]["attn_implementation"] == "flash_attention_2"
     assert cfg["training"]["bf16"] is True
     assert cfg["training"]["fp16"] is False
     assert cfg["training"]["use_accelerate"] is True
@@ -201,3 +202,5 @@ def test_train_source_contains_distributed_runtime_hooks_for_bestshot_concat():
     assert 'config["training"].get("use_accelerate", False)' in source
     assert "accelerator.prepare(" in source
     assert "accelerator.is_main_process" in source
+    assert 'if "attn_implementation" in config["model"]' in source
+    assert "log_flash_attention_runtime" in source

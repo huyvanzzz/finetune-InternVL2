@@ -9,6 +9,7 @@ Nhanh nay dung cho:
 - quantization: `tat 4bit`
 - dtype: `bf16`
 - LoRA: `r=32`
+- attention: `flash_attention_2`
 
 ## 0. Luu y truoc khi len server
 
@@ -218,6 +219,8 @@ Dau run nen thay cac thong tin kieu:
 - `world_size=2`
 - `quantization_enabled=False`
 - `bf16=True`
+- `attn_implementation=flash_attention_2`
+- `FlashAttention runtime | ...`
 - `trajectory_mode=concat`
 - `alter_only=True`
 - `seed=42`

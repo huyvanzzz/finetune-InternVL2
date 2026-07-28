@@ -99,6 +99,48 @@ def build_dataloader_kwargs(config: Dict) -> Dict:
             kwargs["prefetch_factor"] = int(hardware_cfg["prefetch_factor"])
     return kwargs
 
+
+def verify_flash_attention_runtime(model) -> Dict:
+    modules = []
+    for name, module in model.named_modules():
+        if hasattr(module, "use_flash_attn"):
+            requested = bool(getattr(getattr(module, "config", None), "use_flash_attn", False))
+            enabled = bool(getattr(module, "use_flash_attn", False))
+            modules.append(
+                {
+                    "module": name,
+                    "requested": requested,
+                    "enabled": enabled,
+                    "status": "flash" if enabled else "fallback",
+                    "fallback_reason": None if enabled else "use_flash_attn is false at runtime",
+                }
+            )
+    return {
+        "supported_count": len(modules),
+        "flash_enabled_count": sum(1 for item in modules if item["enabled"]),
+        "fallback_count": sum(1 for item in modules if not item["enabled"]),
+        "modules": modules,
+    }
+
+
+def log_flash_attention_runtime(model, logger):
+    report = verify_flash_attention_runtime(model)
+    logger.info(
+        "FlashAttention runtime | supported=%s | flash=%s | fallback=%s",
+        report["supported_count"],
+        report["flash_enabled_count"],
+        report["fallback_count"],
+    )
+    for item in report["modules"][:20]:
+        logger.info(
+            "FlashAttention module | name=%s | requested=%s | status=%s | reason=%s",
+            item["module"],
+            item["requested"],
+            item["status"],
+            item["fallback_reason"],
+        )
+    return report
+
 from wad_dataset import build_dataset
 from model.conversation import get_conv_template
 from qformer_bridge import (
@@ -860,6 +902,8 @@ if __name__ == "__main__":
         "low_cpu_mem_usage": True,
         "trust_remote_code": config["model"]["trust_remote_code"],
     }
+    if "attn_implementation" in config["model"]:
+        model_kwargs["attn_implementation"] = config["model"]["attn_implementation"]
     if quantization_config is not None:
         model_kwargs["quantization_config"] = quantization_config
         if distributed and torch.cuda.is_available():
@@ -884,9 +928,15 @@ if __name__ == "__main__":
             accum_steps,
             int(batch_size) * int(accum_steps) * world_size,
         )
+        logger.info(
+            "Attention runtime config | attn_implementation=%s",
+            config["model"].get("attn_implementation", "default"),
+        )
 
     logger.info("Loading model %s | quantization_enabled=%s", model_name_or_path, quant_enabled)
     model = AutoModel.from_pretrained(model_name_or_path, **model_kwargs)
+    if is_main_process:
+        log_flash_attention_runtime(model, logger)
 
     model.config.use_cache = False
     if config["training"]["gradient_checkpointing"]:
