@@ -3,9 +3,12 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import datetime
+import json
+import pickle
 import re
 import random
 import sys
+from collections import defaultdict
 from typing import Dict
 
 import numpy as np
@@ -14,6 +17,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
+from datasets import load_dataset
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.nn.utils.rnn import pad_sequence
@@ -142,7 +146,9 @@ def log_flash_attention_runtime(model, logger):
     return report
 
 from wad_dataset import build_dataset
+from wad_dataset import WADDatasetForInternVL
 from model.conversation import get_conv_template
+from preprocessing import get_response_format
 from qformer_bridge import (
     align_qformer_bridge_runtime,
     attach_qformer_bridge,
@@ -159,6 +165,8 @@ from trajectory_branch import (
     trajectory_enabled,
 )
 from trajectory_trainability import apply_mode_gated_trajectory_trainability
+from trajectory_branch import build_trajectory_source_from_config
+from scripts.pairs_output import write_prediction_pairs
 
 
 IMG_START_TOKEN = "<img>"
@@ -510,6 +518,168 @@ def test_model(model, tokenizer, val_loader_with_shuffle, shuffle=False):
                 break
 
 
+def prepare_test_auxiliary_data(config):
+    index_file = "./wad_dataset/frame_index.pkl"
+    if not os.path.exists(index_file):
+        raise FileNotFoundError(f"Frame index not found at {index_file}.")
+    with open(index_file, "rb") as f:
+        frame_index = pickle.load(f)
+
+    bbox_file = "all_bboxes_1.jsonl"
+    if os.path.exists(bbox_file):
+        bbox_dataset = load_dataset("json", data_files=bbox_file, split="train")
+    else:
+        bbox_dataset = load_dataset(config["data"]["name"], data_files="all_bboxes_1.jsonl", split="train")
+
+    bbox_by_folder = defaultdict(lambda: defaultdict(list))
+    for bbox_entry in bbox_dataset:
+        folder_id = bbox_entry["folder_id"]
+        frame_id = bbox_entry["frame_id"]
+        bbox_by_folder[folder_id][frame_id].append(
+            {
+                "label": bbox_entry["label"],
+                "confidence": bbox_entry["probs"],
+                "bbox": bbox_entry["boxs"],
+                "relative_position": bbox_entry.get("relative_position", "unknown"),
+                "distance_zone": bbox_entry.get("distance_zone", "unknown"),
+                "coming_to_user": bbox_entry.get("coming_to_user", False),
+                "speed": bbox_entry.get("speed", 0.0),
+                "danger_score": bbox_entry.get("danger_score", 0.0),
+            }
+        )
+    trajectory_source = build_trajectory_source_from_config(config)
+    return frame_index, bbox_by_folder, trajectory_source
+
+
+def build_test_alter_loader(config):
+    response_format = get_response_format(config)
+    frame_index, bbox_by_folder, trajectory_source = prepare_test_auxiliary_data(config)
+    dataset_dict = load_dataset(
+        config["data"]["name"],
+        data_files={"test": "test_alter.json"},
+    )
+    test_dataset = WADDatasetForInternVL(
+        metadata_dataset=dataset_dict,
+        frame_index=frame_index,
+        bbox_by_folder=bbox_by_folder,
+        trajectory_source=trajectory_source,
+        split="test",
+        response_format=response_format,
+    )
+    return DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=lambda batch: batch)
+
+
+def run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation_config):
+    num_patches_list = [pixel_values.shape[0]] if pixel_values is not None else []
+    template = get_conv_template(model.template)
+    template.system_message = model.system_message
+    eos_token_id = tokenizer.convert_tokens_to_ids(template.sep)
+    template.append_message(template.roles[0], question)
+    template.append_message(template.roles[1], None)
+    query = template.get_prompt()
+
+    for num_patches in num_patches_list:
+        image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * model.num_image_token * num_patches + IMG_END_TOKEN
+        query = query.replace("<image>", image_tokens, 1)
+
+    model_inputs = tokenizer(query, return_tensors="pt")
+    embedding_device = model.language_model.get_input_embeddings().weight.device
+    input_ids = model_inputs["input_ids"].to(embedding_device)
+    attention_mask = model_inputs["attention_mask"].to(embedding_device)
+    generation_config = dict(generation_config)
+    generation_config["eos_token_id"] = eos_token_id
+    generation_config["pad_token_id"] = eos_token_id
+    generation_output = model.generate(
+        pixel_values=pixel_values,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **generation_config,
+    )
+    response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
+    return response.split(template.sep)[0].strip()
+
+
+def run_epoch_test_infer(model, tokenizer, config, output_dir, epoch, device):
+    from scripts.metrics import VLMMetrics
+
+    test_loader = build_test_alter_loader(config)
+    response_format = get_response_format(config)
+    metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"
+    epoch_dir = os.path.join(output_dir, f"epoch_{epoch}")
+    output_file = os.path.join(epoch_dir, "eval_test_alter.json")
+    checkpoint_label = epoch_dir
+
+    predictions = []
+    references = []
+    detailed_results = []
+    evaluator = VLMMetrics()
+
+    model.eval()
+    with torch.no_grad():
+        for idx, batch in enumerate(tqdm(test_loader, desc=f"Testing epoch {epoch} on test_alter", leave=False)):
+            sample = batch[0]
+            pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
+            pixel_values = pixel_values.to(torch.bfloat16 if device.type == "cuda" else torch.float32).to(device)
+            question = str(sample["question"])
+            ground_truth = str(sample["answer"])
+            generation_config = dict(
+                max_new_tokens=512,
+                num_beams=3,
+                do_sample=False,
+                repetition_penalty=1.3,
+                early_stopping=True,
+            )
+            if getattr(model, "qformer_enabled", False):
+                qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                q_ids, q_mask = model.encode_qformer_texts(
+                    [qformer_text] * pixel_values.shape[0],
+                    device=pixel_values.device,
+                )
+                model.set_qformer_text(q_ids, q_mask)
+            if getattr(model, "trajectory_enabled", False):
+                model.set_trajectory_inputs(
+                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).to(device),
+                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).to(device),
+                )
+            response = run_model_chat_for_eval(model, tokenizer, pixel_values, question, generation_config)
+            if getattr(model, "qformer_enabled", False):
+                model.clear_qformer_text()
+            if getattr(model, "trajectory_enabled", False):
+                model.clear_trajectory_inputs()
+
+            predictions.append(response)
+            references.append(ground_truth)
+            detailed_results.append(
+                {
+                    "id": idx,
+                    "question": question,
+                    "prediction": response,
+                    "ground_truth": ground_truth,
+                }
+            )
+
+    metrics = evaluator.compute(predictions, references, target_field=metric_target_field)
+    final_output = {
+        "checkpoint": checkpoint_label,
+        "split": "test_alter",
+        "metrics": metrics,
+        "samples": detailed_results,
+    }
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, ensure_ascii=False, indent=4)
+    pairs_path = write_prediction_pairs(output_file, checkpoint_label, "test_alter", detailed_results)
+    logger.info("Epoch %s test_alter metrics | %s", epoch, json.dumps(metrics, ensure_ascii=False))
+    logger.info("Epoch %s test_alter JSON saved at: %s", epoch, output_file)
+    logger.info("Pairs JSON saved at: %s", pairs_path)
+    model.train()
+    if getattr(model, "qformer_enabled", False):
+        model.qformer.eval()
+        model.mlp1.eval()
+    return {"metrics": metrics, "output_file": output_file, "pairs_file": pairs_path}
+
+
 def eval_model(model, val_loader, step, epoch, epochs, loss_mode: str, label_smoothing: float, device, accelerator=None):
     model.eval()
     with torch.no_grad():
@@ -858,7 +1028,22 @@ def train_model(
             avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
             metrics["epoch_summary"].append({"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6)})
             logger.info(f"Epoch {epoch+1} summary | avg_train_loss={avg_epoch_loss:.4f}")
+            test_summary = run_epoch_test_infer(
+                model=unwrapped_model,
+                tokenizer=tokenizer,
+                config=config,
+                output_dir=output_dir,
+                epoch=epoch + 1,
+                device=device,
+            )
+            metrics["epoch_summary"][-1]["test_alter_metrics"] = {
+                key: round(float(value), 6) for key, value in test_summary["metrics"].items()
+            }
+            metrics["epoch_summary"][-1]["test_alter_output_file"] = test_summary["output_file"]
+            metrics["epoch_summary"][-1]["test_alter_pairs_file"] = test_summary["pairs_file"]
             save_metrics(metrics)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":

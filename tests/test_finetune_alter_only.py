@@ -204,3 +204,14 @@ def test_train_source_contains_distributed_runtime_hooks_for_bestshot_concat():
     assert "accelerator.is_main_process" in source
     assert 'if "attn_implementation" in config["model"]' in source
     assert "log_flash_attention_runtime" in source
+
+
+def test_train_source_runs_test_infer_after_each_epoch_checkpoint_save():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "def run_epoch_test_infer(" in source
+    assert "build_test_alter_loader" in source
+    assert 'data_files={"test": "test_alter.json"}' in source
+    assert "write_prediction_pairs" in source
+    assert "Epoch %s test_alter metrics" in source
+    assert "Pairs JSON saved at:" in source

@@ -9,7 +9,6 @@ Nhanh nay dung cho:
 - quantization: `tat 4bit`
 - dtype: `bf16`
 - LoRA: `r=32`
-- attention: `flash_attention_2`
 
 ## 0. Luu y truoc khi len server
 
@@ -127,11 +126,51 @@ Neu server da co `/venv/main` va ban dang o prompt `(main)`, van nen cai lai dun
 ```bash
 cd /workspace/finetune-InternVL2
 pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-pip install pytest
 ```
 
-Neu muon dung `flash-attn`:
+Khong nen chay thang `pip install -r requirements.txt` tren may nay vi file do con pin:
+- `torch==2.4.0`
+- nhieu goi `nvidia-*` cu
+- `flash-attn==2.6.3`
+
+Trong khi may server hien tai da co:
+- `torch 2.12.0+cu130`
+- CUDA `13.0`
+
+Neu cai nguyen file requirements se de gay conflict hoac lam ban moi truong.
+
+Hay cai theo nhom, bo qua `flash-attn` va khong dung vao `torch`:
+
+```bash
+cd /workspace/finetune-InternVL2
+pip install --upgrade pip setuptools wheel
+pip install --force-reinstall "numpy==1.26.4"
+pip install \
+  "accelerate==0.33.0" \
+  "transformers==4.46.2" \
+  "huggingface-hub==0.24.3" \
+  "datasets==2.20.0" \
+  "sentencepiece==0.2.0" \
+  "protobuf" \
+  "timm==1.0.8" \
+  "einops==0.8.0" \
+  "decord==0.6.0" \
+  "safetensors==0.4.3" \
+  "pandas==2.2.2" \
+  "pyarrow==17.0.0" \
+  "scikit-learn" \
+  "evaluate" \
+  "rouge_score" \
+  "requests==2.32.3" \
+  "PyYAML==6.0.1" \
+  "pillow==10.4.0" \
+  "psutil==6.0.0" \
+  "tqdm==4.66.4" \
+  "peft" \
+  pytest
+```
+
+Neu muon dung `flash-attn` sau khi moi truong da on:
 
 ```bash
 pip install ninja
@@ -144,9 +183,13 @@ Neu `flash-attn` loi mismatch CUDA, bo qua tam thoi cung duoc; nhanh nay uu tien
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda)"
+python -c "import numpy; print(numpy.__version__)"
 python -c "import accelerate; print(accelerate.__version__)"
 python -c "import transformers; print(transformers.__version__)"
 python -c "import peft; print(peft.__version__)"
+python -c "import datasets; print(datasets.__version__)"
+python -c "import sentencepiece; print('sentencepiece ok')"
+python -c "import google.protobuf; print('protobuf ok')"
 python -c "import yaml; print('yaml ok')"
 python -m py_compile train.py wad_dataset.py qformer_bridge.py trajectory_branch.py trajectory_trainability.py
 ```
@@ -219,8 +262,6 @@ Dau run nen thay cac thong tin kieu:
 - `world_size=2`
 - `quantization_enabled=False`
 - `bf16=True`
-- `attn_implementation=flash_attention_2`
-- `FlashAttention runtime | ...`
 - `trajectory_mode=concat`
 - `alter_only=True`
 - `seed=42`
