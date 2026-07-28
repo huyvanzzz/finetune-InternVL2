@@ -1321,6 +1321,7 @@ if __name__ == "__main__":
         )
 
     dataloader_kwargs = build_dataloader_kwargs(config)
+    val_batch_size = int(config["training"].get("val_batch_size", batch_size))
 
     train_loader = DataLoader(
         train_dataset,
