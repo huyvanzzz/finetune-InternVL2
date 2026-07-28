@@ -262,10 +262,11 @@ def test_train_and_test_infer_sources_use_batched_generation_helpers():
 def test_test_infer_uses_configurable_batch_size_and_not_hardcoded_one():
     source = (ROOT / "scripts" / "test_infer.py").read_text(encoding="utf-8")
 
+    assert "from tqdm import tqdm" in source
     assert 'parser.add_argument("--batch_size"' in source
     assert 'test_batch_size = int(args.batch_size or config.get("evaluation", {}).get("batch_size", 1))' in source
     assert "batch_size=test_batch_size" in source
-    assert "for batch in test_loader:" in source
+    assert 'for batch in tqdm(test_loader, desc="Testing"):' in source
 
 
 def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():

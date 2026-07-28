@@ -6,6 +6,7 @@ import argparse
 import pickle
 from huggingface_hub import snapshot_download
 from collections import defaultdict
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 from peft import PeftModel
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
@@ -323,7 +324,7 @@ def main():
 
     with torch.no_grad():
         sample_counter = 0
-        for batch in test_loader:
+        for batch in tqdm(test_loader, desc="Testing"):
             generation_config = dict(
                 max_new_tokens=512,
                 num_beams=3,
