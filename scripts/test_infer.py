@@ -165,20 +165,26 @@ def main():
     batch_size = config['training']['batch_size']
         
     # 2. Cấu hình Quantization 4-bit
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=config['model']['quantization']['enabled'],
-        bnb_4bit_compute_dtype=torch.bfloat16 if config['model']['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
-        bnb_4bit_use_double_quant=config['model']['quantization']['double_quant'],
-        bnb_4bit_quant_type=config['model']['quantization']['type']
-    )
+    quantization_enabled = bool(config["model"]["quantization"]["enabled"])
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "device_map": {"": 0},
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": config["model"]["trust_remote_code"],
+    }
+    if "attn_implementation" in config["model"]:
+        model_kwargs["attn_implementation"] = config["model"]["attn_implementation"]
+    if quantization_enabled:
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16 if config['model']['quantization']['compute_dtype'] == "bfloat16" else torch.float16,
+            bnb_4bit_use_double_quant=config['model']['quantization']['double_quant'],
+            bnb_4bit_quant_type=config['model']['quantization']['type']
+        )
     # 3. Load model
     model = AutoModel.from_pretrained(
         model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        device_map={"": 0},
-        low_cpu_mem_usage=True,
-        trust_remote_code=config['model']['trust_remote_code']
+        **model_kwargs,
     )
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
