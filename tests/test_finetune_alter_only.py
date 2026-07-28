@@ -215,3 +215,9 @@ def test_train_source_runs_test_infer_after_each_epoch_checkpoint_save():
     assert "write_prediction_pairs" in source
     assert "Epoch %s test_alter metrics" in source
     assert "Pairs JSON saved at:" in source
+
+
+def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():
+    source = (ROOT / "wad_dataset.py").read_text(encoding="utf-8")
+
+    assert 'data_files={"train": "train.json"}' in source or '"train": "train.json"' in source

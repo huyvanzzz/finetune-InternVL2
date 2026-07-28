@@ -238,10 +238,7 @@ def build_dataset(config: Dict):
     print("Loading metadata...")
     metadata = load_dataset(
         config["data"]["name"],
-        data_files={
-            "train": "train.json",
-            "test": "test_alter.json",
-        },
+        data_files={"train": "train.json"},
     )
 
     print("Loading bboxes...")
