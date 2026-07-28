@@ -41,7 +41,7 @@ def main():
     model.eval()
 
     device = torch.device("cpu" if args.cpu else "cuda")
-    if args.cpu:
+    if args.cpu or quant_cfg is None:
         model.to(device)
 
     pixel_values = torch.zeros(
