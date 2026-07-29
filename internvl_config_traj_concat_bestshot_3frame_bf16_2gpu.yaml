@@ -1,8 +1,8 @@
 experiment:
-  name: "wad_internvl3_training_traj_concat_bestshot_3frame_bf16_2gpu"
+  name: "wad_internvl3_training_traj_concat_bestshot_3frame_r64_bf16_2gpu"
   version: "1.0"
-  description: "InternVL2-2B with 3-frame Q-Former trajectory concat conditioning, bf16 full-weight on 2 GPUs"
-  tags: ["internvl2", "navigation", "mllm", "trajectory", "concat", "3frame", "bf16", "2gpu", "bestshot"]
+  description: "InternVL2-2B with 3-frame Q-Former trajectory concat conditioning, LoRA r64, bf16 full-weight on 2 GPUs"
+  tags: ["internvl2", "navigation", "mllm", "trajectory", "concat", "3frame", "r64", "bf16", "2gpu", "bestshot"]
 
 model:
   architecture: "internvl"
@@ -25,8 +25,8 @@ model:
 
   lora:
     enabled: true
-    r: 32
-    alpha: 32
+    r: 64
+    alpha: 64
     dropout: 0.05
     target_modules:
       - "wqkv"
@@ -73,7 +73,7 @@ data:
   alter_only: true
 
 training:
-  output_dir: "./outputs/internvl3_2b_traj_concat_bestshot_3frame_bf16_2gpu"
+  output_dir: "./outputs/internvl3_2b_traj_concat_bestshot_3frame_r64_bf16_2gpu"
   num_epochs: 10
   batch_size: 1
   val_batch_size: 4

@@ -162,7 +162,8 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["trajectory"]["dropout"] == pytest.approx(0.10)
     assert cfg["data"]["alter_only"] is True
     assert cfg["data"]["response_format"] == "structured_json"
-    assert cfg["model"]["lora"]["r"] == 32
+    assert cfg["model"]["lora"]["r"] == 64
+    assert cfg["model"]["lora"]["alpha"] == 64
     assert cfg["model"]["quantization"]["enabled"] is False
     assert cfg["model"]["attn_implementation"] == "flash_attention_2"
     assert cfg["training"]["bf16"] is True
@@ -195,7 +196,7 @@ def test_concat_bestshot_3frame_config_is_separate_from_1frame_baseline():
     assert cfg["training"]["gradient_accumulation_steps"] == 16
     assert cfg["training"]["val_batch_size"] == 4
     assert cfg["evaluation"]["batch_size"] == 4
-    assert "3frame" in cfg["training"]["output_dir"]
+    assert "3frame_r64" in cfg["training"]["output_dir"]
 
 
 def test_wad_dataset_respects_num_frames_for_question_and_frame_selection():
