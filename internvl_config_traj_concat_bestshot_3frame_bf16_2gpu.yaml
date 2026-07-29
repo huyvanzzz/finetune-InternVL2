@@ -92,8 +92,8 @@ training:
   max_grad_norm: 1.0
   logging_steps: 10
   eval_strategy: "steps"
-  eval_steps: 2000
-  save_steps: 2000
+  eval_steps: null
+  save_steps: null
   save_total_limit: 2
   resume_dir: null
   start_epoch: 0
