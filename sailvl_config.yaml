@@ -10,6 +10,8 @@ model:
   base_model_name_or_path: "Qwen/Qwen2.5-1.5B-Instruct"
   trust_remote_code: true
   multimodal_max_length: 8192
+  flash_attention:
+    enabled: true
 
   qformer:
     enabled: true

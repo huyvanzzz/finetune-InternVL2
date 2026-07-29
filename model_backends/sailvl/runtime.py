@@ -12,11 +12,12 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 from checkpoint_metadata import sanitize_peft_checkpoint_metadata
 from model.conversation import get_conv_template
 from qformer_bridge import qformer_enabled
+from runtime_flash_attention import enable_flash_attention_for_config, flash_attention_requested
 
 from .preprocess import preprocess_sail_image
 from .qformer_bridge import (
@@ -319,8 +320,14 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
         bnb_4bit_use_double_quant=quant_cfg["double_quant"],
         bnb_4bit_quant_type=quant_cfg["type"],
     )
+    model_config = AutoConfig.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=config["model"]["trust_remote_code"],
+    )
+    enable_flash_attention_for_config(model_config, flash_attention_requested(config))
     model = AutoModel.from_pretrained(
         model_name_or_path,
+        config=model_config,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,

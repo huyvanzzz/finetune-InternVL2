@@ -9,6 +9,8 @@ model:
   name: "OpenGVLab/InternVL2_5-2B"
   trust_remote_code: true
   multimodal_max_length: 8192
+  flash_attention:
+    enabled: true
 
   qformer:
     enabled: false

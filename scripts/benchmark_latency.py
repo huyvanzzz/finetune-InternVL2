@@ -1,0 +1,428 @@
+import argparse
+import json
+import math
+import os
+import time
+from statistics import mean
+from typing import Dict, Iterable, List, Optional
+
+from runtime_flash_attention import (
+    collect_flash_attention_status,
+    enable_flash_attention_for_config,
+    flash_attention_requested,
+)
+
+
+TIMING_MODE = "greedy_decode_token_timing"
+
+
+def compute_decode_only_tokens_per_s(generated_token_count: int, decode_after_first_token_seconds: float) -> float:
+    if generated_token_count <= 1 or decode_after_first_token_seconds <= 0:
+        return 0.0
+    return (int(generated_token_count) - 1) / float(decode_after_first_token_seconds)
+
+
+def disabled_object_tracking_timing() -> Dict[str, object]:
+    return {
+        "object_tracking_included": False,
+        "object_tracking_ms": 0.0,
+    }
+
+
+def validate_latency_generation_config(generation_config: Dict):
+    if int(generation_config.get("num_beams", 1)) != 1:
+        raise ValueError("Latency benchmark decode-only tokens/s requires num_beams=1.")
+    if bool(generation_config.get("do_sample", False)):
+        raise ValueError("Latency benchmark decode-only tokens/s requires do_sample=false.")
+
+
+def _percentile(values: List[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    index = max(0, min(len(ordered) - 1, math.ceil((percentile / 100.0) * len(ordered)) - 1))
+    return ordered[index]
+
+
+def _metric_summary(values: Iterable[float]) -> Dict[str, float]:
+    values = [float(value) for value in values]
+    if not values:
+        return {"mean": 0.0, "p50": 0.0, "p90": 0.0}
+    return {
+        "mean": round(mean(values), 6),
+        "p50": round(_percentile(values, 50), 6),
+        "p90": round(_percentile(values, 90), 6),
+    }
+
+
+def summarize_latency_samples(samples: List[Dict]) -> Dict:
+    timing_rows = [sample["timing"] for sample in samples]
+    breakdown_fields = ("object_tracking_ms", "vision_ms", "trajectory_ms", "llm_ms")
+    return {
+        "end_to_end_ms": _metric_summary(row["end_to_end_ms"] for row in timing_rows),
+        "decode_only_tokens_per_s": _metric_summary(row["decode_only_tokens_per_s"] for row in timing_rows),
+        "breakdown_mean_ms": {
+            field: round(mean([float(row.get(field, 0.0)) for row in timing_rows]), 6) if timing_rows else 0.0
+            for field in breakdown_fields
+        },
+    }
+
+
+def build_sample_record(
+    sample_id: int,
+    question: str,
+    prediction: str,
+    generated_token_count: int,
+    end_to_end_ms: float,
+    vision_ms: float,
+    trajectory_ms: Optional[float],
+    llm_ms: float,
+    first_token_ms: float,
+    decode_after_first_token_ms: float,
+    object_tracking_included: bool,
+    object_tracking_ms: float,
+) -> Dict:
+    decode_seconds = float(decode_after_first_token_ms) / 1000.0
+    return {
+        "id": int(sample_id),
+        "question": question,
+        "prediction": prediction,
+        "generated_token_count": int(generated_token_count),
+        "timing": {
+            "end_to_end_ms": float(end_to_end_ms),
+            "object_tracking_included": bool(object_tracking_included),
+            "object_tracking_ms": float(object_tracking_ms),
+            "vision_ms": float(vision_ms),
+            "trajectory_ms": float(trajectory_ms or 0.0),
+            "llm_ms": float(llm_ms),
+            "first_token_ms": float(first_token_ms),
+            "decode_after_first_token_ms": float(decode_after_first_token_ms),
+            "decode_only_tokens_per_s": compute_decode_only_tokens_per_s(generated_token_count, decode_seconds),
+        },
+    }
+
+
+def build_run_metadata(
+    config_path: str,
+    checkpoint: Optional[str],
+    split: str,
+    device: str,
+    config: Dict,
+    generation_config: Dict,
+    timing_mode: str,
+    object_tracking_included: bool,
+    flash_attention_status: Optional[Dict[str, bool]] = None,
+) -> Dict:
+    trajectory_cfg = config.get("trajectory", {})
+    model_cfg = config.get("model", {})
+    flash_attention_status = flash_attention_status or {
+        "flash_attention_requested": flash_attention_requested(config),
+        "flash_attention_available": False,
+        "flash_attention_active": False,
+    }
+    return {
+        "config_path": config_path,
+        "checkpoint": checkpoint or "Base Model",
+        "split": split,
+        "device": device,
+        "model_architecture": model_cfg.get("architecture", "unknown"),
+        "qformer_enabled": bool(model_cfg.get("qformer", {}).get("enabled", False)),
+        "trajectory_enabled": bool(trajectory_cfg.get("enabled", False)),
+        "trajectory_fusion_mode": trajectory_cfg.get("fusion_mode"),
+        "object_tracking_included": bool(object_tracking_included),
+        **flash_attention_status,
+        "generation_config": dict(generation_config),
+        "timing_mode": timing_mode,
+    }
+
+
+def cuda_synchronize_if_available():
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        return
+
+
+class PhaseTimer:
+    def __enter__(self):
+        cuda_synchronize_if_available()
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        cuda_synchronize_if_available()
+        self.elapsed_ms = (time.perf_counter() - self.start) * 1000.0
+
+
+def reset_model_latency_phases(model):
+    if model is not None:
+        model._latency_phase_ms = {"vision_ms": 0.0, "trajectory_ms": 0.0}
+
+
+def get_model_latency_phase(model, phase: str) -> float:
+    return float(getattr(model, "_latency_phase_ms", {}).get(phase, 0.0))
+
+
+def install_extract_feature_latency_hook(model):
+    if model is None or getattr(model, "_latency_extract_feature_hooked", False):
+        return
+    if getattr(model, "_latency_extract_feature_handles_internal_breakdown", False):
+        return
+    original_extract_feature = getattr(model, "extract_feature", None)
+    if original_extract_feature is None:
+        return
+
+    def timed_extract_feature(*args, **kwargs):
+        with PhaseTimer() as timer:
+            result = original_extract_feature(*args, **kwargs)
+        phase_ms = getattr(model, "_latency_phase_ms", None)
+        if phase_ms is not None:
+            phase_ms["vision_ms"] = float(phase_ms.get("vision_ms", 0.0)) + timer.elapsed_ms
+        return result
+
+    model.extract_feature = timed_extract_feature
+    model._latency_extract_feature_hooked = True
+
+
+class TokenTimingStreamer:
+    def __init__(self, clock=time.perf_counter, sync_fn=cuda_synchronize_if_available):
+        self.clock = clock
+        self.sync_fn = sync_fn
+        self.start_time = None
+        self.token_timestamps = []
+
+    def start(self):
+        self.sync_fn()
+        self.start_time = self.clock()
+
+    def put(self, value):
+        self.sync_fn()
+        self.token_timestamps.append(self.clock())
+
+    def end(self):
+        pass
+
+    @property
+    def first_token_ms(self) -> float:
+        if self.start_time is None or not self.token_timestamps:
+            return 0.0
+        return (self.token_timestamps[0] - self.start_time) * 1000.0
+
+    @property
+    def decode_after_first_token_ms(self) -> float:
+        if len(self.token_timestamps) <= 1:
+            return 0.0
+        return (self.token_timestamps[-1] - self.token_timestamps[0]) * 1000.0
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Benchmark model-side latency for VLM variants.")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--split", default="test_alter", choices=["test_QA", "test_alter", "val"])
+    parser.add_argument("--output_file", default="results/latency_benchmark.json")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--warmup_samples", type=int, default=5)
+    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--object_tracking_mode", default="disabled", choices=["disabled"])
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    generation_config = {
+        "max_new_tokens": args.max_new_tokens,
+        "num_beams": args.num_beams,
+        "do_sample": bool(args.do_sample),
+    }
+    validate_latency_generation_config(generation_config)
+
+    # Full runtime benchmarking is intentionally imported lazily so utility tests stay lightweight.
+    import yaml
+    import torch
+
+    from scripts import test_infer
+    from trajectory_branch import load_trajectory_branch
+
+    args.checkpoint = test_infer.resolve_checkpoint_path(args.checkpoint)
+    with open(args.config, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    if args.object_tracking_mode != "disabled":
+        raise ValueError("V1 only supports --object_tracking_mode disabled.")
+
+    response_format = test_infer.get_response_format(config)
+    architecture = config["model"]["architecture"]
+    backend = test_infer.get_backend(architecture) if architecture == "sailvl" else None
+    quantization_config = test_infer.BitsAndBytesConfig(
+        load_in_4bit=config["model"]["quantization"]["enabled"],
+        bnb_4bit_compute_dtype=torch.bfloat16
+        if config["model"]["quantization"]["compute_dtype"] == "bfloat16"
+        else torch.float16,
+        bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
+        bnb_4bit_quant_type=config["model"]["quantization"]["type"],
+    )
+
+    if backend is not None and backend.name == "sailvl":
+        model, tokenizer = backend.load_model_and_tokenizer(config, args.checkpoint)
+        backend.attach_qformer_if_enabled(model, config)
+        if args.checkpoint:
+            backend.load_backend_artifacts(model, args.checkpoint, config)
+    else:
+        model_config = test_infer.AutoConfig.from_pretrained(
+            config["model"]["name"],
+            trust_remote_code=config["model"]["trust_remote_code"],
+        )
+        enable_flash_attention_for_config(model_config, flash_attention_requested(config))
+        model = test_infer.AutoModel.from_pretrained(
+            config["model"]["name"],
+            config=model_config,
+            torch_dtype=torch.bfloat16,
+            quantization_config=quantization_config,
+            device_map={"": 0},
+            low_cpu_mem_usage=True,
+            trust_remote_code=config["model"]["trust_remote_code"],
+        )
+        tokenizer = test_infer.AutoTokenizer.from_pretrained(
+            config["model"]["name"],
+            trust_remote_code=True,
+            use_fast=False,
+        )
+        model.img_context_token_id = tokenizer.convert_tokens_to_ids(test_infer.IMG_CONTEXT_TOKEN)
+        model.system_message = test_infer.SYSTEM_MESSAGE
+        if test_infer.qformer_enabled(config):
+            test_infer.attach_qformer_bridge(model, config)
+
+    if args.checkpoint:
+        if backend is None and test_infer.qformer_enabled(config):
+            test_infer.load_qformer_bridge(model, args.checkpoint, strict=True)
+        if getattr(model, "trajectory_enabled", False):
+            load_trajectory_branch(model, args.checkpoint, strict=True)
+        model.language_model = test_infer.PeftModel.from_pretrained(
+            model.language_model,
+            args.checkpoint,
+            is_trainable=False,
+            device_map={"": 0},
+        )
+
+    model.eval()
+    if hasattr(model, "language_model"):
+        model.language_model.eval()
+    install_extract_feature_latency_hook(model)
+    flash_attention_status = collect_flash_attention_status(model, flash_attention_requested(config))
+
+    frame_index, bbox_by_folder, trajectory_source = test_infer.prepare_auxiliary_data(config)
+    data_file = "test_alter.json" if args.split == "test_alter" else "test_QA.json"
+    dataset_dict = test_infer.load_dataset(config["data"]["name"], data_files={"test": data_file})
+    test_dataset = test_infer.WADDatasetForInternVL(
+        metadata_dataset=dataset_dict,
+        frame_index=frame_index,
+        bbox_by_folder=bbox_by_folder,
+        trajectory_source=trajectory_source,
+        split="test",
+        response_format=response_format,
+        direct_text_alter_prompt_mode=config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy"),
+        direct_text_qa_prompt_mode=config["data"].get("direct_text_qa_prompt_mode", "current_v1"),
+        non_train_error_policy=config["data"].get("non_train_error_policy", "skip"),
+        seed=config["data"].get("seed", 42),
+    )
+
+    samples = []
+    sample_limit = len(test_dataset) if args.limit is None else min(args.limit, len(test_dataset))
+    for idx in range(sample_limit):
+        sample = test_dataset[idx]
+        if sample is None:
+            continue
+        object_tracking = disabled_object_tracking_timing()
+        end_to_end_start = time.perf_counter()
+        reset_model_latency_phases(model)
+        token_streamer = TokenTimingStreamer()
+        timed_generation_config = dict(generation_config)
+        timed_generation_config["streamer"] = token_streamer
+        if backend is not None and backend.name == "sailvl":
+            with PhaseTimer() as llm_timer:
+                token_streamer.start()
+                prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, config)
+            vision_ms = get_model_latency_phase(model, "vision_ms")
+            trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
+        else:
+            with PhaseTimer() as vision_timer:
+                pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
+                question = str(sample["question"])
+                if getattr(model, "qformer_enabled", False):
+                    qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                    q_ids, q_mask = model.encode_qformer_texts([qformer_text] * pixel_values.shape[0], device=pixel_values.device)
+                    model.set_qformer_text(q_ids, q_mask)
+            if getattr(model, "trajectory_enabled", False):
+                model.set_trajectory_inputs(
+                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
+                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                )
+            with PhaseTimer() as llm_timer:
+                token_streamer.start()
+                prediction = test_infer.run_model_chat(
+                    model,
+                    tokenizer,
+                    pixel_values,
+                    str(sample["question"]),
+                    timed_generation_config,
+                )
+            if getattr(model, "qformer_enabled", False):
+                model.clear_qformer_text()
+            if getattr(model, "trajectory_enabled", False):
+                model.clear_trajectory_inputs()
+            vision_ms = vision_timer.elapsed_ms + get_model_latency_phase(model, "vision_ms")
+            trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
+
+        end_to_end_ms = (time.perf_counter() - end_to_end_start) * 1000.0
+        generated_token_count = len(tokenizer.encode(prediction, add_special_tokens=False))
+        first_token_ms = token_streamer.first_token_ms
+        decode_after_first_token_ms = token_streamer.decode_after_first_token_ms
+
+        if idx >= args.warmup_samples:
+            samples.append(
+                build_sample_record(
+                    sample_id=idx,
+                    question=str(sample["question"]),
+                    prediction=prediction,
+                    generated_token_count=generated_token_count,
+                    end_to_end_ms=end_to_end_ms,
+                    vision_ms=vision_ms,
+                    trajectory_ms=trajectory_ms,
+                    llm_ms=llm_timer.elapsed_ms,
+                    first_token_ms=first_token_ms,
+                    decode_after_first_token_ms=decode_after_first_token_ms,
+                    object_tracking_included=object_tracking["object_tracking_included"],
+                    object_tracking_ms=object_tracking["object_tracking_ms"],
+                )
+            )
+
+    output = {
+        "run_metadata": build_run_metadata(
+            config_path=args.config,
+            checkpoint=args.checkpoint,
+            split=args.split,
+            device=str(torch.device("cuda" if torch.cuda.is_available() else "cpu")),
+            config=config,
+            generation_config=generation_config,
+            timing_mode=TIMING_MODE,
+            object_tracking_included=False,
+            flash_attention_status=flash_attention_status,
+        ),
+        "samples": samples,
+        "summary": summarize_latency_samples(samples),
+    }
+    os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
+    with open(args.output_file, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+
+if __name__ == "__main__":
+    main()

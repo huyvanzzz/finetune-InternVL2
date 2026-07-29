@@ -131,6 +131,6 @@
     "torch_dtype": "bfloat16",
     "transformers_version": "4.37.2",
     "use_bfloat16": true,
-    "use_flash_attn": false 
+    "use_flash_attn": true
   }
 }

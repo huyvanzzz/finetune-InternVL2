@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from types import MethodType
 from typing import Dict, Iterable, List, Optional
@@ -10,10 +11,36 @@ from safetensors.torch import load_file, save_file
 from huggingface_hub.utils import EntryNotFoundError
 from transformers import InstructBlipConfig, InstructBlipProcessor, InstructBlipQFormerModel
 from huggingface_hub import hf_hub_download
+from trajectory_branch import (
+    attach_trajectory_branch,
+    build_trajectory_features,
+    build_trajectory_tokens_base,
+)
 
 
 BRIDGE_WEIGHTS_NAME = "qformer_bridge.safetensors"
 BRIDGE_CONFIG_NAME = "qformer_bridge_config.json"
+
+
+def _sync_cuda_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _record_latency_phase(model, phase: str, elapsed_ms: float):
+    phase_ms = getattr(model, "_latency_phase_ms", None)
+    if phase_ms is not None:
+        phase_ms[phase] = float(phase_ms.get(phase, 0.0)) + float(elapsed_ms)
+
+
+def _time_trajectory_call(model, fn):
+    _sync_cuda_if_needed()
+    start = time.perf_counter()
+    result = fn()
+    _sync_cuda_if_needed()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _record_latency_phase(model, "trajectory_ms", elapsed_ms)
+    return result
 
 
 def qformer_enabled(config: Dict) -> bool:
@@ -176,6 +203,11 @@ def _ensure_bridge_device(model, reference: torch.Tensor):
         if module is not None:
             module.to(device=device, dtype=torch.float32)
 
+    for module_name in ("trajectory_backbone", "trajectory_cls_head", "trajectory_token_projector"):
+        module = getattr(model, module_name, None)
+        if module is not None:
+            module.to(device=device, dtype=torch.float32)
+
     model.qformer_query_tokens.data = model.qformer_query_tokens.data.to(device=device, dtype=reference_dtype)
 
 
@@ -202,6 +234,9 @@ def align_qformer_bridge_runtime(model):
 
 
 def _extract_feature_with_qformer(self, pixel_values):
+    _sync_cuda_if_needed()
+    feature_start = time.perf_counter()
+    trajectory_start_ms = float(getattr(self, "_latency_phase_ms", {}).get("trajectory_ms", 0.0))
     vit_embeds = _extract_vit_tokens(self, pixel_values)
     _ensure_bridge_device(self, vit_embeds)
 
@@ -251,9 +286,60 @@ def _extract_feature_with_qformer(self, pixel_values):
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
     mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    dual_traj_tokens = None
+    dual_object_mask = None
+    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
+        dual_traj_tokens, dual_object_mask = _time_trajectory_call(
+            self,
+            lambda: build_trajectory_tokens_base(
+                self,
+                batch_size=mlp1_inputs.shape[0],
+                device=mlp1_inputs.device,
+            ),
+        )
+        traj_cls = _time_trajectory_call(
+            self,
+            lambda: self.trajectory_cls_head(dual_traj_tokens, dual_object_mask).to(mlp1_inputs.dtype),
+        )
+        mlp1_inputs = mlp1_inputs + traj_cls
+    elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "cls_add":
+        traj_cls = _time_trajectory_call(
+            self,
+            lambda: build_trajectory_features(
+                self,
+                batch_size=mlp1_inputs.shape[0],
+                device=mlp1_inputs.device,
+            ).to(mlp1_inputs.dtype),
+        ).to(mlp1_inputs.dtype)
+        mlp1_inputs = mlp1_inputs + traj_cls
     mlp1_dtype = next(self.mlp1.parameters()).dtype
     mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
-    return self.mlp1(mlp1_inputs)
+    visual_tokens = self.mlp1(mlp1_inputs)
+    if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "concat":
+        traj_tokens = _time_trajectory_call(
+            self,
+            lambda: build_trajectory_features(
+                self,
+                batch_size=visual_tokens.shape[0],
+                device=visual_tokens.device,
+            ).to(visual_tokens.dtype),
+        ).to(visual_tokens.dtype)
+        visual_tokens = torch.cat([visual_tokens, traj_tokens], dim=1)
+    elif getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":
+        traj_tokens = _time_trajectory_call(
+            self,
+            lambda: self.trajectory_token_projector(dual_traj_tokens),
+        )
+        traj_tokens = _time_trajectory_call(
+            self,
+            lambda: traj_tokens * dual_object_mask.to(traj_tokens.dtype).unsqueeze(-1),
+        )
+        visual_tokens = torch.cat([visual_tokens, traj_tokens.to(visual_tokens.dtype)], dim=1)
+    _sync_cuda_if_needed()
+    total_elapsed_ms = (time.perf_counter() - feature_start) * 1000.0
+    trajectory_end_ms = float(getattr(self, "_latency_phase_ms", {}).get("trajectory_ms", 0.0))
+    _record_latency_phase(self, "vision_ms", max(0.0, total_elapsed_ms - (trajectory_end_ms - trajectory_start_ms)))
+    return visual_tokens
 
 
 def _encode_qformer_texts(self, texts: List[str], device: Optional[torch.device] = None):
@@ -301,7 +387,7 @@ def save_qformer_bridge(model, output_dir: str):
     metadata = {
         "enabled": True,
         "source_model": model.qformer_source_model,
-        "num_query_tokens": model.num_image_token,
+        "num_query_tokens": getattr(model, "qformer_num_query_tokens", model.num_image_token),
         "prompt_aware": True,
         "bridge_mode": "prompt_aware_preproj_mlp1",
     }
@@ -365,6 +451,7 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
         nn.LayerNorm(qformer_hidden_size),
         nn.Linear(qformer_hidden_size, pixel_shuffle_dim),
     ).to(dtype=torch.float32)
+    model.qformer_num_query_tokens = num_query_tokens
     model.num_image_token = num_query_tokens
 
     if q_cfg["freeze_qformer"]:
@@ -374,6 +461,7 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
         model.mlp1.requires_grad_(False)
 
     model.extract_feature = MethodType(_extract_feature_with_qformer, model)
+    model._latency_extract_feature_handles_internal_breakdown = True
     model.encode_qformer_texts = MethodType(_encode_qformer_texts, model)
     model.set_qformer_text = MethodType(_set_qformer_text, model)
     model.clear_qformer_text = MethodType(_clear_qformer_text, model)
@@ -387,6 +475,13 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
             f"num_query_tokens={num_query_tokens}, "
             f"llm_hidden_size={llm_hidden_size}"
         )
+    attach_trajectory_branch(
+        model,
+        config,
+        pixel_shuffle_dim=pixel_shuffle_dim,
+        llm_hidden_size=llm_hidden_size,
+        logger=logger,
+    )
     return model
 
 

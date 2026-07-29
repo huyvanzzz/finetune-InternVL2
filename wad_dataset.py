@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 from data import process_image
 from preprocessing import format_ground_truth, get_response_format
+from trajectory_branch import build_trajectory_source_from_config
 
 
 ALTER_DIRECT_TEXT_LEGACY_PROMPT = (
@@ -168,6 +169,7 @@ class WADDatasetForInternVL(Dataset):
         metadata_dataset,
         frame_index: dict,
         bbox_by_folder: dict,
+        trajectory_source=None,
         split: str = "train",
         response_format: str = "structured_json",
         direct_text_alter_prompt_mode: str = "fixed_legacy",
@@ -178,6 +180,7 @@ class WADDatasetForInternVL(Dataset):
         self.metadata = metadata_dataset[split]
         self.frame_index = frame_index
         self.bbox_by_folder = bbox_by_folder
+        self.trajectory_source = trajectory_source
         self.split = split
         self.response_format = response_format
         self.direct_text_alter_prompt_mode = direct_text_alter_prompt_mode
@@ -299,6 +302,11 @@ Follow Chain-of-Thought reasoning:
 
             question = f"<image>\n{text_content}"
             answer = format_ground_truth(sample, self.response_format)
+            trajectory_fields = (
+                self.trajectory_source.encode(frame_path, last_frame_id)
+                if self.trajectory_source is not None
+                else {}
+            )
 
             return {
                 "question": question,
@@ -311,6 +319,7 @@ Follow Chain-of-Thought reasoning:
                 "selected_prompt_id": selected_prompt_id,
                 "selected_prompt_text": text_content.strip(),
                 "frame_path": frame_path,
+                **trajectory_fields,
             }
 
         except Exception as e:
@@ -337,6 +346,7 @@ def build_dataset(config: Dict):
     from datasets import load_dataset
 
     response_format = get_response_format(config)
+    trajectory_source = build_trajectory_source_from_config(config)
     prompt_mode = config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy")
     qa_prompt_mode = config["data"].get("direct_text_qa_prompt_mode", "current_v1")
     non_train_error_policy = config["data"].get("non_train_error_policy", "skip")
@@ -474,6 +484,7 @@ def build_dataset(config: Dict):
         metadata_dataset={"train": train_samples},
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
+        trajectory_source=trajectory_source,
         split="train",
         response_format=response_format,
         direct_text_alter_prompt_mode=prompt_mode,
@@ -487,6 +498,7 @@ def build_dataset(config: Dict):
         metadata_dataset={"val": val_samples},
         frame_index=frame_index,
         bbox_by_folder=bbox_by_folder,
+        trajectory_source=trajectory_source,
         split="val",
         response_format=response_format,
         direct_text_alter_prompt_mode=prompt_mode,
