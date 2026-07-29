@@ -724,8 +724,13 @@ def run_epoch_test_infer(model, tokenizer, config, output_dir, epoch, device, ac
 
     inference_model = accelerator.unwrap_model(model) if accelerator is not None else model
     inference_model.eval()
+    test_iterator = tqdm(
+        test_loader,
+        desc=f"Testing epoch {epoch} on test_alter",
+        disable=not is_main_process,
+    )
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in test_iterator:
             generation_config = dict(
                 max_new_tokens=512,
                 num_beams=3,
