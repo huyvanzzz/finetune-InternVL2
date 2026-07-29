@@ -36,6 +36,53 @@ def validate_latency_generation_config(generation_config: Dict):
         raise ValueError("Latency benchmark decode-only tokens/s requires do_sample=false.")
 
 
+def bitsandbytes_available() -> bool:
+    try:
+        import importlib.metadata
+
+        importlib.metadata.version("bitsandbytes")
+    except Exception:
+        return False
+    return True
+
+
+def resolve_quantization_policy(
+    config: Dict,
+    mode: str = "auto",
+    torch_cuda_version: Optional[str] = None,
+    bitsandbytes_available: Optional[bool] = None,
+) -> Dict[str, object]:
+    mode = str(mode or "auto").strip().lower()
+    if mode not in {"auto", "config", "on", "off"}:
+        raise ValueError(f"Unsupported quantization mode: {mode}")
+
+    requested = bool(config.get("model", {}).get("quantization", {}).get("enabled", False))
+    if mode == "on":
+        requested = True
+    elif mode == "off":
+        requested = False
+
+    effective = requested
+    disable_reason = None
+    if not requested:
+        effective = False
+    elif mode == "auto":
+        bnb_ok = bitsandbytes_available if bitsandbytes_available is not None else globals()["bitsandbytes_available"]()
+        if not bnb_ok:
+            effective = False
+            disable_reason = "bitsandbytes_not_installed"
+        elif str(torch_cuda_version or "").startswith("13."):
+            effective = False
+            disable_reason = "bitsandbytes_cuda13_unsupported"
+
+    return {
+        "quantization_requested": bool(requested),
+        "quantization_effective": bool(effective),
+        "quantization_mode": mode,
+        "quantization_disable_reason": disable_reason,
+    }
+
+
 def _percentile(values: List[float], percentile: float) -> float:
     if not values:
         return 0.0
@@ -112,6 +159,7 @@ def build_run_metadata(
     timing_mode: str,
     object_tracking_included: bool,
     flash_attention_status: Optional[Dict[str, bool]] = None,
+    quantization_policy: Optional[Dict[str, object]] = None,
 ) -> Dict:
     trajectory_cfg = config.get("trajectory", {})
     model_cfg = config.get("model", {})
@@ -131,6 +179,7 @@ def build_run_metadata(
         "trajectory_fusion_mode": trajectory_cfg.get("fusion_mode"),
         "object_tracking_included": bool(object_tracking_included),
         **flash_attention_status,
+        **(quantization_policy or {}),
         "generation_config": dict(generation_config),
         "timing_mode": timing_mode,
     }
@@ -229,6 +278,7 @@ def parse_args():
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--quantization_mode", default="auto", choices=["auto", "config", "on", "off"])
     parser.add_argument("--object_tracking_mode", default="disabled", choices=["disabled"])
     return parser.parse_args()
 
@@ -256,50 +306,61 @@ def main():
     if args.object_tracking_mode != "disabled":
         raise ValueError("V1 only supports --object_tracking_mode disabled.")
 
+    quantization_policy = resolve_quantization_policy(
+        config,
+        mode=args.quantization_mode,
+        torch_cuda_version=torch.version.cuda,
+    )
     response_format = test_infer.get_response_format(config)
     architecture = config["model"]["architecture"]
     backend = test_infer.get_backend(architecture) if architecture == "sailvl" else None
-    quantization_config = test_infer.BitsAndBytesConfig(
-        load_in_4bit=config["model"]["quantization"]["enabled"],
-        bnb_4bit_compute_dtype=torch.bfloat16
-        if config["model"]["quantization"]["compute_dtype"] == "bfloat16"
-        else torch.float16,
-        bnb_4bit_use_double_quant=config["model"]["quantization"]["double_quant"],
-        bnb_4bit_quant_type=config["model"]["quantization"]["type"],
-    )
+    runtime_config = dict(config)
+    runtime_config["model"] = dict(config["model"])
+    runtime_config["model"]["quantization"] = dict(config["model"]["quantization"])
+    runtime_config["model"]["quantization"]["enabled"] = bool(quantization_policy["quantization_effective"])
+    quantization_config = None
+    if quantization_policy["quantization_effective"]:
+        quantization_config = test_infer.BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16
+            if runtime_config["model"]["quantization"]["compute_dtype"] == "bfloat16"
+            else torch.float16,
+            bnb_4bit_use_double_quant=runtime_config["model"]["quantization"]["double_quant"],
+            bnb_4bit_quant_type=runtime_config["model"]["quantization"]["type"],
+        )
 
     if backend is not None and backend.name == "sailvl":
-        model, tokenizer = backend.load_model_and_tokenizer(config, args.checkpoint)
-        backend.attach_qformer_if_enabled(model, config)
+        model, tokenizer = backend.load_model_and_tokenizer(runtime_config, args.checkpoint)
+        backend.attach_qformer_if_enabled(model, runtime_config)
         if args.checkpoint:
-            backend.load_backend_artifacts(model, args.checkpoint, config)
+            backend.load_backend_artifacts(model, args.checkpoint, runtime_config)
     else:
         model_config = test_infer.AutoConfig.from_pretrained(
-            config["model"]["name"],
-            trust_remote_code=config["model"]["trust_remote_code"],
+            runtime_config["model"]["name"],
+            trust_remote_code=runtime_config["model"]["trust_remote_code"],
         )
-        enable_flash_attention_for_config(model_config, flash_attention_requested(config))
+        enable_flash_attention_for_config(model_config, flash_attention_requested(runtime_config))
         model = test_infer.AutoModel.from_pretrained(
-            config["model"]["name"],
+            runtime_config["model"]["name"],
             config=model_config,
             torch_dtype=torch.bfloat16,
             quantization_config=quantization_config,
             device_map={"": 0},
             low_cpu_mem_usage=True,
-            trust_remote_code=config["model"]["trust_remote_code"],
+            trust_remote_code=runtime_config["model"]["trust_remote_code"],
         )
         tokenizer = test_infer.AutoTokenizer.from_pretrained(
-            config["model"]["name"],
+            runtime_config["model"]["name"],
             trust_remote_code=True,
             use_fast=False,
         )
         model.img_context_token_id = tokenizer.convert_tokens_to_ids(test_infer.IMG_CONTEXT_TOKEN)
         model.system_message = test_infer.SYSTEM_MESSAGE
-        if test_infer.qformer_enabled(config):
-            test_infer.attach_qformer_bridge(model, config)
+        if test_infer.qformer_enabled(runtime_config):
+            test_infer.attach_qformer_bridge(model, runtime_config)
 
     if args.checkpoint:
-        if backend is None and test_infer.qformer_enabled(config):
+        if backend is None and test_infer.qformer_enabled(runtime_config):
             test_infer.load_qformer_bridge(model, args.checkpoint, strict=True)
         if getattr(model, "trajectory_enabled", False):
             load_trajectory_branch(model, args.checkpoint, strict=True)
@@ -314,11 +375,11 @@ def main():
     if hasattr(model, "language_model"):
         model.language_model.eval()
     install_extract_feature_latency_hook(model)
-    flash_attention_status = collect_flash_attention_status(model, flash_attention_requested(config))
+    flash_attention_status = collect_flash_attention_status(model, flash_attention_requested(runtime_config))
 
-    frame_index, bbox_by_folder, trajectory_source = test_infer.prepare_auxiliary_data(config)
+    frame_index, bbox_by_folder, trajectory_source = test_infer.prepare_auxiliary_data(runtime_config)
     data_file = "test_alter.json" if args.split == "test_alter" else "test_QA.json"
-    dataset_dict = test_infer.load_dataset(config["data"]["name"], data_files={"test": data_file})
+    dataset_dict = test_infer.load_dataset(runtime_config["data"]["name"], data_files={"test": data_file})
     test_dataset = test_infer.WADDatasetForInternVL(
         metadata_dataset=dataset_dict,
         frame_index=frame_index,
@@ -326,10 +387,10 @@ def main():
         trajectory_source=trajectory_source,
         split="test",
         response_format=response_format,
-        direct_text_alter_prompt_mode=config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy"),
-        direct_text_qa_prompt_mode=config["data"].get("direct_text_qa_prompt_mode", "current_v1"),
-        non_train_error_policy=config["data"].get("non_train_error_policy", "skip"),
-        seed=config["data"].get("seed", 42),
+        direct_text_alter_prompt_mode=runtime_config["data"].get("direct_text_alter_prompt_mode", "fixed_legacy"),
+        direct_text_qa_prompt_mode=runtime_config["data"].get("direct_text_qa_prompt_mode", "current_v1"),
+        non_train_error_policy=runtime_config["data"].get("non_train_error_policy", "skip"),
+        seed=runtime_config["data"].get("seed", 42),
     )
 
     samples = []
@@ -347,7 +408,7 @@ def main():
         if backend is not None and backend.name == "sailvl":
             with PhaseTimer() as llm_timer:
                 token_streamer.start()
-                prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, config)
+                prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, runtime_config)
             vision_ms = get_model_latency_phase(model, "vision_ms")
             trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
         else:
@@ -415,6 +476,7 @@ def main():
             timing_mode=TIMING_MODE,
             object_tracking_included=False,
             flash_attention_status=flash_attention_status,
+            quantization_policy=quantization_policy,
         ),
         "samples": samples,
         "summary": summarize_latency_samples(samples),

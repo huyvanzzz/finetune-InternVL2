@@ -107,6 +107,34 @@ def test_flash_attention_metadata_records_requested_available_and_active():
     assert metadata["flash_attention_active"] is True
 
 
+def test_auto_quantization_disables_bnb_on_cuda_13():
+    from scripts.benchmark_latency import resolve_quantization_policy
+
+    config = {"model": {"quantization": {"enabled": True}}}
+
+    policy = resolve_quantization_policy(config, mode="auto", torch_cuda_version="13.0", bitsandbytes_available=True)
+
+    assert policy == {
+        "quantization_requested": True,
+        "quantization_effective": False,
+        "quantization_mode": "auto",
+        "quantization_disable_reason": "bitsandbytes_cuda13_unsupported",
+    }
+
+
+def test_config_quantization_keeps_requested_policy_even_on_cuda_13():
+    from scripts.benchmark_latency import resolve_quantization_policy
+
+    config = {"model": {"quantization": {"enabled": True}}}
+
+    policy = resolve_quantization_policy(config, mode="config", torch_cuda_version="13.0", bitsandbytes_available=True)
+
+    assert policy["quantization_requested"] is True
+    assert policy["quantization_effective"] is True
+    assert policy["quantization_mode"] == "config"
+    assert policy["quantization_disable_reason"] is None
+
+
 def test_enable_flash_attention_sets_nested_vision_config():
     from scripts.benchmark_latency import enable_flash_attention_for_config
 
