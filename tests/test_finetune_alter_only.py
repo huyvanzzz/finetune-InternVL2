@@ -194,8 +194,8 @@ def test_concat_bestshot_3frame_config_is_separate_from_1frame_baseline():
     assert cfg["training"]["bf16"] is True
     assert cfg["training"]["batch_size"] == 1
     assert cfg["training"]["gradient_accumulation_steps"] == 16
-    assert cfg["training"]["val_batch_size"] == 4
-    assert cfg["evaluation"]["batch_size"] == 4
+    assert cfg["training"]["val_batch_size"] == 8
+    assert cfg["evaluation"]["batch_size"] == 8
     assert "3frame_r64" in cfg["training"]["output_dir"]
 
 
