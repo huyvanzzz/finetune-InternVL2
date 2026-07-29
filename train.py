@@ -1081,8 +1081,8 @@ def train_model(
                 else:
                     loss.backward()
 
-                gathered_loss = accelerator.gather(raw_loss.detach().reshape(1)) if accelerator is not None else raw_loss.detach().reshape(1)
-                mean_loss = float(gathered_loss.mean().item())
+                # Keep train logging local to avoid per-microbatch distributed collectives.
+                mean_loss = float(raw_loss.detach().float().item())
                 accumulated_loss_for_log += mean_loss
 
                 should_step = accelerator.sync_gradients if accelerator is not None else (i % accum_steps == 0)
