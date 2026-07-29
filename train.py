@@ -1123,24 +1123,27 @@ def train_model(
                     metrics["val_loss"].append({"step": i, "epoch": epoch + 1, "loss": round(val_loss, 6)})
                     save_metrics(metrics)
 
-            if save_steps and i % save_steps == 0 and is_main_process:
+            if save_steps and i % save_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
-                os.makedirs(step_save_dir, exist_ok=True)
-                logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
+                if is_main_process:
+                    step_save_dir = f"{output_dir}/epoch_{epoch+1}_step_{i}/"
+                    os.makedirs(step_save_dir, exist_ok=True)
+                    logger.info(f"Saving model, tokenizer, opt, scheduler at step {i} to {step_save_dir}")
 
-                unwrapped_model.language_model.save_pretrained(step_save_dir)
-                save_qformer_bridge(unwrapped_model, step_save_dir)
-                save_trajectory_branch(unwrapped_model, step_save_dir)
-                tokenizer.save_pretrained(step_save_dir)
-                optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
-                if converted:
-                    logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
-                if overridden_groups:
-                    logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
-                torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
-                torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
+                    unwrapped_model.language_model.save_pretrained(step_save_dir)
+                    save_qformer_bridge(unwrapped_model, step_save_dir)
+                    save_trajectory_branch(unwrapped_model, step_save_dir)
+                    tokenizer.save_pretrained(step_save_dir)
+                    optimizer_state_dict, converted, overridden_groups = export_sanitized_optimizer_state_dict(optimizer)
+                    if converted:
+                        logger.info("Sanitized %s optimizer state tensors to float32 before save.", converted)
+                    if overridden_groups:
+                        logger.info("Normalized foreach/fused flags in %s optimizer param_groups before save.", overridden_groups)
+                    torch.save(optimizer_state_dict, os.path.join(step_save_dir, "optimizer.pt"))
+                    torch.save(lr_scheduler.state_dict(), os.path.join(step_save_dir, "scheduler.pt"))
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
 
         if accelerator is not None:
             accelerator.wait_for_everyone()

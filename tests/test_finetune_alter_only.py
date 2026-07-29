@@ -407,6 +407,16 @@ def test_train_source_supports_separate_val_and_test_batch_sizes_with_accelerate
     assert "build_test_alter_loader(config, batch_size=test_batch_size)" in source
 
 
+def test_train_source_step_save_barriers_are_not_main_process_only():
+    source = (ROOT / "train.py").read_text(encoding="utf-8")
+
+    assert "if save_steps and i % save_steps == 0 and is_main_process:" not in source
+    assert "if save_steps and i % save_steps == 0:" in source
+    step_save_block = source.split("if save_steps and i % save_steps == 0:", 1)[1].split("if accelerator is not None:\n            accelerator.wait_for_everyone()\n\n        if is_main_process:", 1)[0]
+    assert step_save_block.count("accelerator.wait_for_everyone()") >= 2
+    assert "if is_main_process:" in step_save_block
+
+
 def test_train_source_prepares_epoch_test_runtime_once_and_reuses_it():
     source = (ROOT / "train.py").read_text(encoding="utf-8")
 
