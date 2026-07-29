@@ -453,3 +453,32 @@ def test_wad_dataset_train_builder_does_not_load_test_alter_with_train_schema():
     source = (ROOT / "wad_dataset.py").read_text(encoding="utf-8")
 
     assert 'data_files={"train": "train.json"}' in source or '"train": "train.json"' in source
+
+
+def test_decode_sweep_script_contract_for_1frame_analysis():
+    source = (ROOT / "scripts" / "test_decode_sweep.py").read_text(encoding="utf-8")
+
+    for preset in (
+        "greedy_rp10",
+        "beam5_rp12",
+        "beam3_rp10_len08",
+        "beam5_rp10_len08",
+    ):
+        assert preset in source
+    assert "official_beam3_rp13" not in source
+    assert 'parser.add_argument("--batch_size", type=int, default=16)' in source
+    assert "VLMMetrics" not in source
+    assert "TfidfVectorizer" not in source
+    assert "TF-IDF" not in source
+    assert "decode_sweep_summary.json" in source
+    assert "sample_metrics" in source
+
+
+def test_decode_sweep_batch16_only_changes_1frame_config():
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat_bestshot_bf16_2gpu.yaml").read_text(encoding="utf-8"))
+    three_frame_cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat_bestshot_3frame_bf16_2gpu.yaml").read_text(encoding="utf-8"))
+
+    assert cfg["data"]["num_frames"] == 1
+    assert cfg["evaluation"]["batch_size"] == 16
+    assert three_frame_cfg["data"]["num_frames"] == 3
+    assert three_frame_cfg["evaluation"]["batch_size"] == 8
