@@ -1151,23 +1151,7 @@ def train_model(
             avg_epoch_loss = sum(epoch_train) / len(epoch_train) if epoch_train else float("nan")
             metrics["epoch_summary"].append({"epoch": epoch + 1, "avg_train_loss": round(avg_epoch_loss, 6)})
             logger.info(f"Epoch {epoch+1} summary | avg_train_loss={avg_epoch_loss:.4f}")
-            test_summary = run_epoch_test_infer(
-                model=unwrapped_model,
-                tokenizer=tokenizer,
-                config=config,
-                output_dir=output_dir,
-                epoch=epoch + 1,
-                device=device,
-                accelerator=accelerator,
-                epoch_test_runtime=epoch_test_runtime,
-            )
-            if test_summary is not None:
-                metrics["epoch_summary"][-1]["test_alter_metrics"] = {
-                    key: round(float(value), 6) for key, value in test_summary["metrics"].items()
-                }
-                metrics["epoch_summary"][-1]["test_alter_output_file"] = test_summary["output_file"]
-                metrics["epoch_summary"][-1]["test_alter_pairs_file"] = test_summary["pairs_file"]
-                save_metrics(metrics)
+            save_metrics(metrics)
         if accelerator is not None:
             accelerator.wait_for_everyone()
 

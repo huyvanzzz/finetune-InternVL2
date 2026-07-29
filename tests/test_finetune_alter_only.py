@@ -208,7 +208,7 @@ def test_train_source_contains_distributed_runtime_hooks_for_bestshot_concat():
     assert "log_flash_attention_runtime" in source
 
 
-def test_train_source_runs_test_infer_after_each_epoch_checkpoint_save():
+def test_train_source_keeps_manual_test_helpers_but_does_not_auto_test_during_train():
     source = (ROOT / "train.py").read_text(encoding="utf-8")
 
     assert "def run_epoch_test_infer(" in source
@@ -217,6 +217,10 @@ def test_train_source_runs_test_infer_after_each_epoch_checkpoint_save():
     assert "write_prediction_pairs" in source
     assert "Epoch %s test_alter metrics" in source
     assert "Pairs JSON saved at:" in source
+    assert "test_summary = run_epoch_test_infer(" not in source
+    assert '"test_alter_metrics"' not in source
+    assert '"test_alter_output_file"' not in source
+    assert '"test_alter_pairs_file"' not in source
 
 
 def test_train_source_uses_interval_logging_and_suppresses_runtime_noise():
