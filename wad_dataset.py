@@ -45,6 +45,8 @@ class WADDatasetForInternVL(Dataset):
         trajectory_source=None,
         split: str = "train",
         response_format: str = "structured_json",
+        num_frames: int = 1,
+        frame_indices: List[int] = None,
     ):
         self.metadata = metadata_dataset[split]
         self.frame_index = frame_index
@@ -52,6 +54,8 @@ class WADDatasetForInternVL(Dataset):
         self.trajectory_source = trajectory_source
         self.split = split
         self.response_format = response_format
+        self.num_frames = int(num_frames)
+        self.frame_indices = list(frame_indices or [4, 6, 8])
 
     def __len__(self):
         return len(self.metadata)
@@ -77,15 +81,25 @@ class WADDatasetForInternVL(Dataset):
 
     def _select_frames_safe(self, frame_path: str) -> List[int]:
         available_frames = sorted(self.frame_index[frame_path].keys())
-        target_indices = [4, 6, 8]
 
         selected_frames = []
-        for idx in target_indices:
+        for idx in self.frame_indices:
             if idx < len(available_frames):
                 selected_frames.append(available_frames[idx])
             else:
                 selected_frames.append(available_frames[-1])
         return selected_frames
+
+    def _select_frame_ids(self, frame_path: str) -> List[int]:
+        selected_frames = self._select_frames_safe(frame_path)
+        if self.num_frames == 1:
+            return [selected_frames[-1]]
+        if self.num_frames == len(selected_frames):
+            return selected_frames
+        raise ValueError(
+            f"Unsupported num_frames={self.num_frames}. "
+            f"Expected 1 or {len(selected_frames)} for frame_indices={self.frame_indices}."
+        )
 
     def _build_text_content(self, sample: Dict) -> str:
         if self.response_format == "direct_text":
@@ -126,21 +140,22 @@ Follow Chain-of-Thought reasoning:
 <answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>"""
         return text_content
 
-    def _build_question(self, text_content: str) -> str:
-        return f"<image>\n{text_content}"
+    def _build_question(self, text_content: str, num_images: int = 1) -> str:
+        return f"{'<image>' * int(num_images)}\n{text_content}"
 
     def get_debug_snapshot(self, idx: int) -> Dict:
         sample = self.metadata[idx]
         frame_path = sample["frame_path"]
-        frame_ids = self._select_frames_safe(frame_path)
+        frame_ids = self._select_frame_ids(frame_path)
         last_frame_id = frame_ids[-1]
         text_content = self._build_text_content(sample)
         answer = format_ground_truth(sample, self.response_format)
 
         snapshot = {
             "frame_path": frame_path,
+            "frame_ids": frame_ids,
             "last_frame_id": last_frame_id,
-            "question": self._build_question(text_content),
+            "question": self._build_question(text_content, num_images=len(frame_ids)),
             "qformer_text": text_content.strip(),
             "answer": answer,
             "has_trajectory": False,
@@ -160,13 +175,13 @@ Follow Chain-of-Thought reasoning:
             sample = self.metadata[idx]
             frame_path = sample["frame_path"]
 
-            frame_ids = self._select_frames_safe(frame_path)
+            frame_ids = self._select_frame_ids(frame_path)
             last_frame_id = frame_ids[-1]
-            frames = self._load_frames(frame_path, [last_frame_id])
+            frames = self._load_frames(frame_path, frame_ids)
             pixel_values = [process_image(img) for img in frames]
 
             text_content = self._build_text_content(sample)
-            question = self._build_question(text_content)
+            question = self._build_question(text_content, num_images=len(frames))
             answer = format_ground_truth(sample, self.response_format)
             trajectory_fields = (
                 self.trajectory_source.encode(frame_path, last_frame_id)
@@ -212,6 +227,7 @@ def _print_debug_samples(name: str, dataset: WADDatasetForInternVL, subset: Subs
         print(
             f"[DEBUG] {name} sample {local_i} | "
             f"frame_path={snapshot['frame_path']} | "
+            f"frame_ids={snapshot['frame_ids']} | "
             f"last_frame_id={snapshot['last_frame_id']} | "
             f"has_qa={snapshot['has_qa']}"
         )
@@ -291,6 +307,8 @@ def build_dataset(config: Dict):
         trajectory_source=trajectory_source,
         split="train",
         response_format=response_format,
+        num_frames=int(config["data"].get("num_frames", 1)),
+        frame_indices=config["data"].get("frame_indices", [4, 6, 8]),
     )
 
     train_size = config["data"]["train_split"]

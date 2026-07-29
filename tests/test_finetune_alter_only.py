@@ -178,6 +178,98 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["hardware"]["prefetch_factor"] == 2
 
 
+def test_concat_bestshot_3frame_config_is_separate_from_1frame_baseline():
+    baseline = yaml.safe_load((ROOT / "internvl_config_traj_concat_bestshot_bf16_2gpu.yaml").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((ROOT / "internvl_config_traj_concat_bestshot_3frame_bf16_2gpu.yaml").read_text(encoding="utf-8"))
+
+    assert baseline["data"]["num_frames"] == 1
+    assert cfg["trajectory"]["fusion_mode"] == "concat"
+    assert cfg["data"]["num_frames"] == 3
+    assert cfg["data"]["frame_indices"] == [4, 6, 8]
+    assert cfg["data"]["response_format"] == "structured_json"
+    assert cfg["data"]["alter_only"] is True
+    assert cfg["model"]["lora"]["r"] == 32
+    assert cfg["model"]["quantization"]["enabled"] is False
+    assert cfg["training"]["bf16"] is True
+    assert cfg["training"]["batch_size"] == 1
+    assert cfg["training"]["gradient_accumulation_steps"] == 16
+    assert cfg["training"]["val_batch_size"] == 4
+    assert cfg["evaluation"]["batch_size"] == 4
+    assert "3frame" in cfg["training"]["output_dir"]
+
+
+def test_wad_dataset_respects_num_frames_for_question_and_frame_selection():
+    rows = [{"frame_path": "video_a", "alter": "go forward safely"}]
+    frame_index = {"video_a": {i: {"shard": "dummy.tar", "tar_path": f"{i}.jpg"} for i in range(10)}}
+
+    one_frame = wad_dataset.WADDatasetForInternVL(
+        metadata_dataset={"train": rows},
+        frame_index=frame_index,
+        bbox_by_folder={},
+        trajectory_source=None,
+        split="train",
+        response_format="structured_json",
+        num_frames=1,
+        frame_indices=[4, 6, 8],
+    )
+    three_frame = wad_dataset.WADDatasetForInternVL(
+        metadata_dataset={"train": rows},
+        frame_index=frame_index,
+        bbox_by_folder={},
+        trajectory_source=None,
+        split="train",
+        response_format="structured_json",
+        num_frames=3,
+        frame_indices=[4, 6, 8],
+    )
+
+    text = one_frame._build_text_content(rows[0])
+    assert one_frame._select_frame_ids("video_a") == [8]
+    assert one_frame._build_question(text, num_images=1).startswith("<image>\n")
+    assert one_frame._build_question(text, num_images=1).count("<image>") == 1
+
+    assert three_frame._select_frame_ids("video_a") == [4, 6, 8]
+    assert three_frame._build_question(text, num_images=3).startswith("<image><image><image>\n")
+    assert three_frame._build_question(text, num_images=3).count("<image>") == 3
+
+
+def test_wad_dataset_3frame_falls_back_to_last_available_frame_and_keeps_trajectory_last_frame():
+    class DummyTrajectorySource:
+        source_file = "dummy"
+
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, frame_path, frame_id):
+            self.calls.append((frame_path, frame_id))
+            return {
+                "trajectory_label_ids": torch.zeros(6, dtype=torch.long),
+                "trajectory_direction_ids": torch.zeros(6, dtype=torch.long),
+                "trajectory_numeric_feats": torch.zeros(6, 6, dtype=torch.float32),
+                "trajectory_object_mask": torch.zeros(6, dtype=torch.long),
+            }
+
+    rows = [{"frame_path": "short_video", "alter": "go forward safely"}]
+    frame_index = {"short_video": {0: {}, 1: {}, 2: {}, 3: {}, 4: {}}}
+    trajectory_source = DummyTrajectorySource()
+    dataset = wad_dataset.WADDatasetForInternVL(
+        metadata_dataset={"train": rows},
+        frame_index=frame_index,
+        bbox_by_folder={},
+        trajectory_source=trajectory_source,
+        split="train",
+        response_format="structured_json",
+        num_frames=3,
+        frame_indices=[4, 6, 8],
+    )
+
+    assert dataset._select_frame_ids("short_video") == [4, 4, 4]
+    snapshot = dataset.get_debug_snapshot(0)
+    assert snapshot["frame_ids"] == [4, 4, 4]
+    assert snapshot["last_frame_id"] == 4
+    assert trajectory_source.calls[-1] == ("short_video", 4)
+
+
 def test_concat_bestshot_structured_prompt_matches_cebc853_but_keeps_single_image_placeholder():
     dataset = wad_dataset.WADDatasetForInternVL(
         metadata_dataset={"train": [{"frame_path": "dummy", "alter": "go forward safely"}]},
@@ -198,6 +290,18 @@ def test_concat_bestshot_structured_prompt_matches_cebc853_but_keeps_single_imag
     assert '2. Comprehension: Synthesize details into the "scene".' in question
     assert '3. Decision: Formulate the final "instruction".' in question
     assert '<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>' in question
+
+
+def test_train_and_test_infer_replace_each_image_placeholder_per_frame():
+    train_source = (ROOT / "train.py").read_text(encoding="utf-8")
+    infer_source = (ROOT / "scripts" / "test_infer.py").read_text(encoding="utf-8")
+
+    assert "def replace_image_placeholders(" in train_source
+    assert "def replace_image_placeholders(" in infer_source
+    assert 'if query.count("<image>") != len(num_patches_list):' in train_source
+    assert 'if query.count("<image>") != len(num_patches_list):' in infer_source
+    assert 'if "<image>" in query:' in train_source
+    assert 'if "<image>" in query:' in infer_source
 
 
 def test_concat_bestshot_structured_target_and_metric_contract():
@@ -239,6 +343,22 @@ def test_concat_bestshot_bf16_2gpu_notebook_keeps_pretrain_checkpoint_and_uses_a
     assert 'EVAL_ALL_EPOCHS = True' in infer_cell
     assert "glob('epoch_*')" in infer_cell
     assert "Pairs JSON:" in infer_cell
+
+
+def test_concat_bestshot_3frame_notebook_uses_3frame_config_and_pretrain_checkpoint_surface():
+    notebook = json.loads((ROOT / "run_qformer_concat_bestshot_3frame_bf16_2gpu.ipynb").read_text(encoding="utf-8"))
+    cell0 = "".join(notebook["cells"][0]["source"])
+    train_cell = "".join(notebook["cells"][5]["source"])
+    infer_cell = "".join(notebook["cells"][6]["source"])
+
+    assert 'TARGET_BRANCH = "feature/trajectory-pretrain-qformer-concat-bestshot-bf16"' in cell0
+    assert 'CONFIG_PATH = "internvl_config_traj_concat_bestshot_3frame_bf16_2gpu.yaml"' in cell0
+    assert 'TRAIN_CHECKPOINT = ""' in train_cell
+    assert 'PRETRAIN_CHECKPOINT = ""' in train_cell
+    assert 'cmd += ["--pretrain_checkpoint", PRETRAIN_CHECKPOINT]' in train_cell
+    assert '"accelerate", "launch", "--num_processes", "2"' in train_cell
+    assert '"--split", "test_alter"' in infer_cell
+    assert 'concat_bestshot_3frame_' in infer_cell
 
 
 def test_train_source_contains_distributed_runtime_hooks_for_bestshot_concat():

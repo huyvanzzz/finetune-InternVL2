@@ -27,6 +27,20 @@ IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 
 
+def replace_image_placeholders(query: str, num_patches_list, num_image_token: int) -> str:
+    if query.count("<image>") != len(num_patches_list):
+        raise ValueError(
+            f"Image placeholder count mismatch: placeholders={query.count('<image>')} "
+            f"frames={len(num_patches_list)} tiles_per_frame={list(num_patches_list)}"
+        )
+    for num_patches in num_patches_list:
+        image_tokens = "<img>" + IMG_CONTEXT_TOKEN * num_image_token * int(num_patches) + "</img>"
+        query = query.replace("<image>", image_tokens, 1)
+    if "<image>" in query:
+        raise ValueError("Unreplaced <image> placeholder remains after image token replacement.")
+    return query
+
+
 def log_runtime_prompt_state(model, stage):
     print(
         f"[PROMPT STATE][{stage}] template={getattr(model, 'template', 'unknown')} | "
@@ -51,7 +65,7 @@ def run_model_batch_chat(model, tokenizer, batch, generation_config, device):
 
     pixel_values_chunks = []
     questions = []
-    num_patches_list = []
+    batch_num_patches_lists = []
     qformer_texts = []
     trajectory_label_ids = []
     trajectory_direction_ids = []
@@ -60,11 +74,12 @@ def run_model_batch_chat(model, tokenizer, batch, generation_config, device):
     pixel_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
     for sample in batch:
+        frame_num_patches = [int(torch.as_tensor(p).shape[0]) for p in sample["pixel_values"]]
         pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
         pixel_values = pixel_values.to(dtype=pixel_dtype, device=device)
         pixel_values_chunks.append(pixel_values)
-        num_patches = int(pixel_values.shape[0])
-        num_patches_list.append(num_patches)
+        num_patches = sum(frame_num_patches)
+        batch_num_patches_lists.append(frame_num_patches)
         question = str(sample["question"])
         questions.append(question)
 
@@ -93,14 +108,13 @@ def run_model_batch_chat(model, tokenizer, batch, generation_config, device):
 
     queries = []
     template = None
-    for question, num_patches in zip(questions, num_patches_list):
+    for question, frame_num_patches in zip(questions, batch_num_patches_lists):
         template = get_conv_template(model.template)
         template.system_message = model.system_message
         template.append_message(template.roles[0], question)
         template.append_message(template.roles[1], None)
         query = template.get_prompt()
-        image_tokens = "<img>" + IMG_CONTEXT_TOKEN * model.num_image_token * num_patches + "</img>"
-        query = query.replace("<image>", image_tokens, 1)
+        query = replace_image_placeholders(query, frame_num_patches, model.num_image_token)
         queries.append(query)
 
     tokenizer.padding_side = "left"
@@ -302,6 +316,8 @@ def main():
         trajectory_source=trajectory_source,
         split='test',
         response_format=response_format,
+        num_frames=int(config["data"].get("num_frames", 1)),
+        frame_indices=config["data"].get("frame_indices", [4, 6, 8]),
     )
     
     test_batch_size = int(args.batch_size or config.get("evaluation", {}).get("batch_size", 1))

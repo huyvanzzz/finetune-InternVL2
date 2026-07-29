@@ -210,6 +210,20 @@ IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 SYSTEM_MESSAGE = "You are a navigation assistant for visually impaired users."
 
 
+def replace_image_placeholders(query: str, num_patches_list, num_image_token: int) -> str:
+    if query.count("<image>") != len(num_patches_list):
+        raise ValueError(
+            f"Image placeholder count mismatch: placeholders={query.count('<image>')} "
+            f"frames={len(num_patches_list)} tiles_per_frame={list(num_patches_list)}"
+        )
+    for num_patches in num_patches_list:
+        image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_image_token * int(num_patches) + IMG_END_TOKEN
+        query = query.replace("<image>", image_tokens, 1)
+    if "<image>" in query:
+        raise ValueError("Unreplaced <image> placeholder remains after image token replacement.")
+    return query
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train InternVL with optional checkpoint resume.")
     parser.add_argument("--config", type=str, default=CONFIG_PATH, help="Path to YAML config file.")
@@ -434,9 +448,7 @@ class CollaterFn:
 
             num_patches_list = [pv.shape[0] for pv in pixel_values]
             total_tiles = sum(num_patches_list)
-            for num_patches in num_patches_list:
-                image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token * num_patches + IMG_END_TOKEN
-                query = query.replace("<image>", image_tokens, 1)
+            query = replace_image_placeholders(query, num_patches_list, self.model.num_image_token)
 
             input_ids = self.tokenizer.encode(query, add_special_tokens=False)
             answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
@@ -600,6 +612,8 @@ def build_test_alter_loader(config, batch_size: int):
         trajectory_source=trajectory_source,
         split="test",
         response_format=response_format,
+        num_frames=int(config["data"].get("num_frames", 1)),
+        frame_indices=config["data"].get("frame_indices", [4, 6, 8]),
     )
     return DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: batch)
 
@@ -627,7 +641,7 @@ def run_model_batch_chat_for_eval(model, tokenizer, batch, generation_config, de
 
     pixel_values_chunks = []
     questions = []
-    num_patches_list = []
+    batch_num_patches_lists = []
     qformer_texts = []
     trajectory_label_ids = []
     trajectory_direction_ids = []
@@ -636,11 +650,12 @@ def run_model_batch_chat_for_eval(model, tokenizer, batch, generation_config, de
     pixel_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
     for sample in batch:
+        frame_num_patches = [int(torch.as_tensor(p).shape[0]) for p in sample["pixel_values"]]
         pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0)
         pixel_values = pixel_values.to(dtype=pixel_dtype, device=device)
         pixel_values_chunks.append(pixel_values)
-        num_patches = int(pixel_values.shape[0])
-        num_patches_list.append(num_patches)
+        num_patches = sum(frame_num_patches)
+        batch_num_patches_lists.append(frame_num_patches)
         question = str(sample["question"])
         questions.append(question)
 
@@ -669,14 +684,13 @@ def run_model_batch_chat_for_eval(model, tokenizer, batch, generation_config, de
 
     queries = []
     template = None
-    for question, num_patches in zip(questions, num_patches_list):
+    for question, frame_num_patches in zip(questions, batch_num_patches_lists):
         template = get_conv_template(model.template)
         template.system_message = model.system_message
         template.append_message(template.roles[0], question)
         template.append_message(template.roles[1], None)
         query = template.get_prompt()
-        image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * model.num_image_token * num_patches + IMG_END_TOKEN
-        query = query.replace("<image>", image_tokens, 1)
+        query = replace_image_placeholders(query, frame_num_patches, model.num_image_token)
         queries.append(query)
 
     tokenizer.padding_side = "left"
