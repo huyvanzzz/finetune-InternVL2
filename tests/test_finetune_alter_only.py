@@ -161,7 +161,7 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["trajectory"]["ffn_dim"] == 768
     assert cfg["trajectory"]["dropout"] == pytest.approx(0.10)
     assert cfg["data"]["alter_only"] is True
-    assert cfg["data"]["response_format"] == "direct_text"
+    assert cfg["data"]["response_format"] == "structured_json"
     assert cfg["model"]["lora"]["r"] == 32
     assert cfg["model"]["quantization"]["enabled"] is False
     assert cfg["model"]["attn_implementation"] == "flash_attention_2"
@@ -176,6 +176,51 @@ def test_concat_bestshot_bf16_2gpu_config_disables_4bit_and_enables_accelerate()
     assert cfg["hardware"]["pin_memory"] is True
     assert cfg["hardware"]["persistent_workers"] is True
     assert cfg["hardware"]["prefetch_factor"] == 2
+
+
+def test_concat_bestshot_structured_prompt_matches_cebc853_but_keeps_single_image_placeholder():
+    dataset = wad_dataset.WADDatasetForInternVL(
+        metadata_dataset={"train": [{"frame_path": "dummy", "alter": "go forward safely"}]},
+        frame_index={},
+        bbox_by_folder={},
+        trajectory_source=None,
+        split="train",
+        response_format="structured_json",
+    )
+
+    text_content = dataset._build_text_content({"alter": "go forward safely"})
+    question = dataset._build_question(text_content)
+
+    assert question.startswith("<image>\n")
+    assert "<image><image><image>" not in question
+    assert "Analyze: location, weather, traffic, scene -> then give instruction." in question
+    assert '1. Perception: Extract "location", "weather", and "traffic".' in question
+    assert '2. Comprehension: Synthesize details into the "scene".' in question
+    assert '3. Decision: Formulate the final "instruction".' in question
+    assert '<answer>{"location": "...", "weather": "...", "traffic": "...", "scene": "<concise visual summary, max 2 sentences>", "instruction": "<actionable alert and guidance>"}</answer>' in question
+
+
+def test_concat_bestshot_structured_target_and_metric_contract():
+    from preprocessing import format_ground_truth
+
+    sample = {
+        "area_type": "Road",
+        "weather_condition": "Sunny",
+        "traffic_flow_rating": "High",
+        "summary": "A busy road with people nearby.",
+        "alter": "Please slow down and keep to the left.",
+    }
+
+    answer = format_ground_truth(sample, "structured_json")
+    assert answer.startswith("<answer>{")
+    assert answer.endswith("}</answer>")
+    assert '"location": "road"' in answer
+    assert '"weather": "sunny"' in answer
+    assert '"traffic": "high"' in answer
+    assert '"instruction": "Please slow down and keep to the left."' in answer
+
+    infer_source = (ROOT / "scripts" / "test_infer.py").read_text(encoding="utf-8")
+    assert 'metric_target_field = "raw_text" if response_format == "direct_text" else "instruction"' in infer_source
 
 
 def test_concat_bestshot_bf16_2gpu_notebook_keeps_pretrain_checkpoint_and_uses_accelerate():

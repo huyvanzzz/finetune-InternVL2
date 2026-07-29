@@ -93,7 +93,7 @@ class WADDatasetForInternVL(Dataset):
         else:
             text_content = """
 
-Analyze: location, weather, traffic, scene → then give instruction.
+Analyze: location, weather, traffic, scene -> then give instruction.
 
 Follow Chain-of-Thought reasoning:
 1. Perception: Extract "location", "weather", and "traffic".
