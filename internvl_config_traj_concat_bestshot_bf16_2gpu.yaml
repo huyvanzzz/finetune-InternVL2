@@ -73,7 +73,7 @@ data:
 
 training:
   output_dir: "./outputs/internvl3_2b_traj_concat_bestshot_bf16_2gpu"
-  num_epochs: 5
+  num_epochs: 10
   batch_size: 2
   val_batch_size: 8
   gradient_accumulation_steps: 8
