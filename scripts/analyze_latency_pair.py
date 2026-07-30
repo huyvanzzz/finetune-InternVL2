@@ -14,6 +14,12 @@ TIMING_FIELDS = (
     "decode_after_first_token_ms",
     "decode_only_tokens_per_s",
 )
+RUNTIME_CALL_COUNT_FIELDS = (
+    "extract_feature_call_count",
+    "qformer_encode_call_count",
+    "set_qformer_text_call_count",
+    "clear_qformer_text_call_count",
+)
 
 
 def percentile(values: List[float], percentile_value: float) -> float:
@@ -52,6 +58,10 @@ def build_paired_latency_rows(no_qformer_run: Dict, qformer_run: Dict) -> List[D
             - float(no_qformer_sample.get("timing", {}).get(field, 0.0))
             for field in TIMING_FIELDS
         }
+        runtime_call_count_delta = {
+            field: int(qformer_sample.get(field, 0)) - int(no_qformer_sample.get(field, 0))
+            for field in RUNTIME_CALL_COUNT_FIELDS
+        }
         rows.append(
             {
                 "id": sample_id,
@@ -60,6 +70,7 @@ def build_paired_latency_rows(no_qformer_run: Dict, qformer_run: Dict) -> List[D
                 "generated_token_delta": int(qformer_sample.get("generated_token_count", 0))
                 - int(no_qformer_sample.get("generated_token_count", 0)),
                 "timing_delta": timing_delta,
+                "runtime_call_count_delta": runtime_call_count_delta,
             }
         )
     return rows
@@ -73,6 +84,10 @@ def summarize_rows(rows: List[Dict]) -> Dict:
         **{
             f"{field}_delta": summarize_values(row["timing_delta"].get(field, 0.0) for row in rows)
             for field in TIMING_FIELDS
+        },
+        **{
+            f"{field}_delta": summarize_values(row["runtime_call_count_delta"].get(field, 0) for row in rows)
+            for field in RUNTIME_CALL_COUNT_FIELDS
         },
     }
 

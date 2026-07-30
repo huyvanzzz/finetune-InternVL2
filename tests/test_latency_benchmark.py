@@ -59,6 +59,12 @@ def test_non_trajectory_sample_uses_zero_trajectory_timing():
         question_token_count=5,
         num_image_patches=1,
         model_num_image_token=32,
+        runtime_call_counts={
+            "extract_feature_call_count": 1,
+            "qformer_encode_call_count": 1,
+            "set_qformer_text_call_count": 1,
+            "clear_qformer_text_call_count": 1,
+        },
     )
 
     assert record["timing"]["trajectory_ms"] == 0.0
@@ -66,6 +72,69 @@ def test_non_trajectory_sample_uses_zero_trajectory_timing():
     assert record["question_token_count"] == 5
     assert record["num_image_patches"] == 1
     assert record["image_context_token_count"] == 32
+    assert record["extract_feature_call_count"] == 1
+    assert record["qformer_encode_call_count"] == 1
+    assert record["set_qformer_text_call_count"] == 1
+    assert record["clear_qformer_text_call_count"] == 1
+
+
+def test_runtime_call_counter_hooks_count_qformer_methods_once():
+    from scripts.benchmark_latency import (
+        get_model_runtime_call_counts,
+        install_runtime_call_counter_hooks,
+        reset_model_runtime_call_counts,
+    )
+
+    class Model:
+        def extract_feature(self, pixel_values):
+            return pixel_values
+
+        def encode_qformer_texts(self, texts):
+            return texts
+
+        def set_qformer_text(self, input_ids, attention_mask):
+            return (input_ids, attention_mask)
+
+        def clear_qformer_text(self):
+            return None
+
+    model = Model()
+    install_runtime_call_counter_hooks(model)
+    reset_model_runtime_call_counts(model)
+
+    assert model.extract_feature("pixels") == "pixels"
+    assert model.encode_qformer_texts(["prompt"]) == ["prompt"]
+    assert model.set_qformer_text("ids", "mask") == ("ids", "mask")
+    assert model.clear_qformer_text() is None
+
+    assert get_model_runtime_call_counts(model) == {
+        "extract_feature_call_count": 1,
+        "qformer_encode_call_count": 1,
+        "set_qformer_text_call_count": 1,
+        "clear_qformer_text_call_count": 1,
+    }
+
+
+def test_runtime_call_counter_defaults_missing_methods_to_zero():
+    from scripts.benchmark_latency import (
+        get_model_runtime_call_counts,
+        install_runtime_call_counter_hooks,
+        reset_model_runtime_call_counts,
+    )
+
+    class Model:
+        pass
+
+    model = Model()
+    install_runtime_call_counter_hooks(model)
+    reset_model_runtime_call_counts(model)
+
+    assert get_model_runtime_call_counts(model) == {
+        "extract_feature_call_count": 0,
+        "qformer_encode_call_count": 0,
+        "set_qformer_text_call_count": 0,
+        "clear_qformer_text_call_count": 0,
+    }
 
 
 def test_run_metadata_records_trajectory_fusion_mode():

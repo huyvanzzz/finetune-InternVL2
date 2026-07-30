@@ -28,6 +28,8 @@ def test_build_paired_latency_rows_reports_field_deltas():
             {
                 "id": 7,
                 "generated_token_count": 12,
+                "extract_feature_call_count": 1,
+                "qformer_encode_call_count": 0,
                 "timing": {
                     "end_to_end_ms": 100.0,
                     "first_token_ms": 20.0,
@@ -42,6 +44,8 @@ def test_build_paired_latency_rows_reports_field_deltas():
             {
                 "id": 7,
                 "generated_token_count": 12,
+                "extract_feature_call_count": 1,
+                "qformer_encode_call_count": 1,
                 "timing": {
                     "end_to_end_ms": 80.0,
                     "first_token_ms": 25.0,
@@ -59,3 +63,5 @@ def test_build_paired_latency_rows_reports_field_deltas():
     assert rows[0]["timing_delta"]["end_to_end_ms"] == -20.0
     assert rows[0]["timing_delta"]["first_token_ms"] == 5.0
     assert rows[0]["timing_delta"]["decode_only_tokens_per_s"] == pytest.approx(5.0)
+    assert rows[0]["runtime_call_count_delta"]["extract_feature_call_count"] == 0
+    assert rows[0]["runtime_call_count_delta"]["qformer_encode_call_count"] == 1

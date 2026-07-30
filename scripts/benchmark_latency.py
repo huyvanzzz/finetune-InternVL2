@@ -18,6 +18,12 @@ RESTORE_EVAL_TOKEN_WARNING = (
     "restore_eval uses beam search to match restore-779cc7b eval behavior; "
     "decode_only_tokens_per_s is recorded for debugging only, not as the primary latency metric."
 )
+RUNTIME_CALL_COUNT_FIELDS = {
+    "extract_feature": "extract_feature_call_count",
+    "encode_qformer_texts": "qformer_encode_call_count",
+    "set_qformer_text": "set_qformer_text_call_count",
+    "clear_qformer_text": "clear_qformer_text_call_count",
+}
 
 
 def compute_decode_only_tokens_per_s(generated_token_count: int, decode_after_first_token_seconds: float) -> float:
@@ -180,11 +186,13 @@ def build_sample_record(
     question_token_count: Optional[int] = None,
     num_image_patches: Optional[int] = None,
     model_num_image_token: Optional[int] = None,
+    runtime_call_counts: Optional[Dict[str, int]] = None,
 ) -> Dict:
     decode_seconds = float(decode_after_first_token_ms) / 1000.0
     image_context_token_count = None
     if num_image_patches is not None and model_num_image_token is not None:
         image_context_token_count = int(num_image_patches) * int(model_num_image_token)
+    runtime_call_counts = runtime_call_counts or {}
 
     return {
         "id": int(sample_id),
@@ -195,6 +203,10 @@ def build_sample_record(
         "num_image_patches": int(num_image_patches) if num_image_patches is not None else None,
         "model_num_image_token": int(model_num_image_token) if model_num_image_token is not None else None,
         "image_context_token_count": image_context_token_count,
+        **{
+            field: int(runtime_call_counts.get(field, 0))
+            for field in RUNTIME_CALL_COUNT_FIELDS.values()
+        },
         "timing": {
             "end_to_end_ms": float(end_to_end_ms),
             "object_tracking_included": bool(object_tracking_included),
@@ -308,6 +320,45 @@ class PhaseTimer:
 def reset_model_latency_phases(model):
     if model is not None:
         model._latency_phase_ms = {"vision_ms": 0.0, "trajectory_ms": 0.0}
+
+
+def reset_model_runtime_call_counts(model):
+    if model is not None:
+        model._latency_runtime_call_counts = {
+            field: 0 for field in RUNTIME_CALL_COUNT_FIELDS.values()
+        }
+
+
+def get_model_runtime_call_counts(model) -> Dict[str, int]:
+    counts = getattr(model, "_latency_runtime_call_counts", {}) if model is not None else {}
+    return {
+        field: int(counts.get(field, 0))
+        for field in RUNTIME_CALL_COUNT_FIELDS.values()
+    }
+
+
+def install_runtime_call_counter_hooks(model):
+    if model is None:
+        return
+
+    hooked_methods = getattr(model, "_latency_call_counter_hooked_methods", set())
+    for method_name, counter_field in RUNTIME_CALL_COUNT_FIELDS.items():
+        if method_name in hooked_methods:
+            continue
+        original_method = getattr(model, method_name, None)
+        if not callable(original_method):
+            continue
+
+        def counted_method(*args, _original_method=original_method, _counter_field=counter_field, **kwargs):
+            counts = getattr(model, "_latency_runtime_call_counts", None)
+            if counts is not None:
+                counts[_counter_field] = int(counts.get(_counter_field, 0)) + 1
+            return _original_method(*args, **kwargs)
+
+        setattr(model, method_name, counted_method)
+        hooked_methods.add(method_name)
+
+    model._latency_call_counter_hooked_methods = hooked_methods
 
 
 def get_model_latency_phase(model, phase: str) -> float:
@@ -476,6 +527,7 @@ def main():
     if hasattr(model, "language_model"):
         model.language_model.eval()
     install_extract_feature_latency_hook(model)
+    install_runtime_call_counter_hooks(model)
     flash_attention_status = collect_flash_attention_status(model, flash_attention_requested(runtime_config))
 
     frame_index, bbox_by_folder, trajectory_source = test_infer.prepare_auxiliary_data(runtime_config)
@@ -507,6 +559,7 @@ def main():
         object_tracking = disabled_object_tracking_timing()
         end_to_end_start = time.perf_counter()
         reset_model_latency_phases(model)
+        reset_model_runtime_call_counts(model)
         token_streamer = TokenTimingStreamer()
         timed_generation_config = dict(generation_config)
         should_time_tokens = bool(generation_validity["decode_only_tokens_per_s_valid"])
@@ -554,6 +607,7 @@ def main():
         generated_token_count = len(tokenizer.encode(prediction, add_special_tokens=False))
         first_token_ms = token_streamer.first_token_ms
         decode_after_first_token_ms = token_streamer.decode_after_first_token_ms
+        runtime_call_counts = get_model_runtime_call_counts(model)
 
         if idx >= args.warmup_samples:
             samples.append(
@@ -573,6 +627,7 @@ def main():
                     question_token_count=question_token_count,
                     num_image_patches=num_image_patches,
                     model_num_image_token=model_num_image_token,
+                    runtime_call_counts=runtime_call_counts,
                 )
             )
 
