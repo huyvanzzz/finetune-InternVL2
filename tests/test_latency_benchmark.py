@@ -365,12 +365,12 @@ def test_latency_generation_mode_defaults_to_greedy_decode_timing():
         "max_new_tokens": 512,
         "num_beams": 1,
         "do_sample": False,
-        "use_cache": True,
     }
     assert validity == {
         "generation_mode": "latency_greedy",
         "decode_only_tokens_per_s_valid": True,
         "decode_only_tokens_per_s_warning": None,
+        "use_cache_requested": True,
     }
 
 
@@ -390,8 +390,8 @@ def test_restore_eval_generation_mode_matches_779_generation_contract():
         "do_sample": False,
         "repetition_penalty": 1.3,
         "early_stopping": True,
-        "use_cache": True,
     }
+    assert validity["use_cache_requested"] is True
     assert validity["decode_only_tokens_per_s_valid"] is False
     assert "restore_eval" in validity["decode_only_tokens_per_s_warning"]
 

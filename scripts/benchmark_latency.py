@@ -83,13 +83,13 @@ def build_generation_config(
             "max_new_tokens": int(max_new_tokens),
             "num_beams": int(num_beams),
             "do_sample": bool(do_sample),
-            "use_cache": True,
         }
         validate_latency_generation_config(generation_config)
         return generation_config, {
             "generation_mode": "latency_greedy",
             "decode_only_tokens_per_s_valid": True,
             "decode_only_tokens_per_s_warning": None,
+            "use_cache_requested": True,
         }
     if mode == "restore_eval":
         return {
@@ -98,11 +98,11 @@ def build_generation_config(
             "do_sample": False,
             "repetition_penalty": 1.3,
             "early_stopping": True,
-            "use_cache": True,
         }, {
             "generation_mode": "restore_eval",
             "decode_only_tokens_per_s_valid": False,
             "decode_only_tokens_per_s_warning": RESTORE_EVAL_TOKEN_WARNING,
+            "use_cache_requested": True,
         }
     raise ValueError(f"Unsupported generation mode: {generation_mode}")
 
