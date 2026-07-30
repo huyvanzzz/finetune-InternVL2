@@ -230,7 +230,9 @@ class TrajectorySource:
         objects = self.lookup.get((str(folder_id), int(frame_id)))
         if objects is None:
             return _empty_encoded_sample(self.num_objects, self.numeric_dim)
+        return self.encode_objects(objects)
 
+    def encode_objects(self, objects: List[Dict]) -> Dict[str, torch.Tensor]:
         label_ids = torch.zeros(self.num_objects, dtype=torch.long)
         direction_ids = torch.zeros(self.num_objects, dtype=torch.long)
         numeric_feats = torch.zeros(self.num_objects, self.numeric_dim, dtype=torch.float32)

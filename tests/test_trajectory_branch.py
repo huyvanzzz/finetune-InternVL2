@@ -109,6 +109,46 @@ def test_trajectory_source_returns_empty_object_sample_for_missing_record(tmp_pa
     assert encoded["trajectory_label_ids"].tolist() == [0, 0, 0, 0, 0, 0]
     assert encoded["trajectory_direction_ids"].tolist() == [0, 0, 0, 0, 0, 0]
     assert encoded["trajectory_object_mask"].tolist() == [0, 0, 0, 0, 0, 0]
+
+
+def test_trajectory_source_encodes_online_objects_without_file_lookup(tmp_path):
+    source_path = tmp_path / "traj.json"
+    _write_canonical(
+        source_path,
+        [
+            {
+                "folder_id": "sample_a.frame",
+                "frame_id": 8,
+                "objects": [
+                    {
+                        "label": "person",
+                        "boxs": [0.1, 0.2, 0.3, 0.4],
+                        "relative_position": "12 o'clock",
+                        "movement_angle": 0.25,
+                        "speed_percent": 1.5,
+                    }
+                ],
+            }
+        ],
+    )
+    source = TrajectorySource.from_file(str(source_path))
+
+    encoded = source.encode_objects(
+        [
+            {
+                "label": "person",
+                "boxs": [0.2, 0.3, 0.4, 0.5],
+                "relative_position": "12 o'clock",
+                "movement_angle": 0.5,
+                "speed_percent": 2.0,
+            }
+        ]
+    )
+
+    assert encoded["trajectory_label_ids"].tolist() == [1, 0, 0, 0, 0, 0]
+    assert encoded["trajectory_direction_ids"].tolist() == [1, 0, 0, 0, 0, 0]
+    assert encoded["trajectory_numeric_feats"][0].tolist() == [0.2, 0.3, 0.4, 0.5, 0.5, 2.0]
+    assert encoded["trajectory_object_mask"].tolist() == [1, 0, 0, 0, 0, 0]
     assert torch.equal(encoded["trajectory_numeric_feats"], torch.zeros(6, 6))
 
 
