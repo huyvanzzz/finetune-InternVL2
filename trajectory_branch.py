@@ -273,22 +273,29 @@ class TrajectoryBackbone(nn.Module):
         num_layers: int = 2,
         ffn_dim: int = 256,
         num_objects: int = TRAJECTORY_NUM_OBJECTS,
+        mlp_dropout: float = 0.0,
     ):
         super().__init__()
         self.num_objects = num_objects
         self.d_traj = d_traj
         self.label_embedding = nn.Embedding(vocab_size, d_cat, padding_idx=TRAJECTORY_PAD_UNK_ID)
         self.direction_embedding = nn.Embedding(direction_vocab_size, d_dir, padding_idx=TRAJECTORY_PAD_UNK_ID)
-        self.numeric_mlp = nn.Sequential(
+        numeric_layers = [
             nn.Linear(TRAJECTORY_NUMERIC_DIM, d_numeric_hidden),
             nn.GELU(),
-            nn.Linear(d_numeric_hidden, d_numeric_hidden),
-        )
-        self.object_mlp = nn.Sequential(
+        ]
+        if float(mlp_dropout) > 0:
+            numeric_layers.append(nn.Dropout(float(mlp_dropout)))
+        numeric_layers.append(nn.Linear(d_numeric_hidden, d_numeric_hidden))
+        self.numeric_mlp = nn.Sequential(*numeric_layers)
+        object_layers = [
             nn.Linear(d_cat + d_dir + d_numeric_hidden, d_traj),
             nn.GELU(),
-            nn.Linear(d_traj, d_traj),
-        )
+        ]
+        if float(mlp_dropout) > 0:
+            object_layers.append(nn.Dropout(float(mlp_dropout)))
+        object_layers.append(nn.Linear(d_traj, d_traj))
+        self.object_mlp = nn.Sequential(*object_layers)
         self.slot_embedding = nn.Parameter(torch.zeros(1, num_objects, d_traj))
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_traj,
@@ -504,6 +511,45 @@ def _trajectory_state_dict(model) -> Dict[str, torch.Tensor]:
     return state
 
 
+def _checkpoint_uses_dropout_mlp(module_state: Dict[str, torch.Tensor]) -> bool:
+    return any(key.startswith("numeric_mlp.3.") or key.startswith("object_mlp.3.") for key in module_state)
+
+
+def _model_uses_dropout_mlp(module: nn.Module) -> bool:
+    return any(name.startswith("numeric_mlp.3.") or name.startswith("object_mlp.3.") for name in module.state_dict())
+
+
+def _rebuild_trajectory_backbone_for_checkpoint(model, module_state: Dict[str, torch.Tensor]) -> bool:
+    module = getattr(model, "trajectory_backbone", None)
+    if module is None:
+        return False
+    checkpoint_dropout_layout = _checkpoint_uses_dropout_mlp(module_state)
+    if checkpoint_dropout_layout == _model_uses_dropout_mlp(module):
+        return False
+
+    rebuilt = TrajectoryBackbone(
+        vocab_size=module.label_embedding.num_embeddings,
+        direction_vocab_size=module.direction_embedding.num_embeddings,
+        d_cat=module.label_embedding.embedding_dim,
+        d_dir=module.direction_embedding.embedding_dim,
+        d_numeric_hidden=module.numeric_mlp[0].out_features,
+        d_traj=module.d_traj,
+        num_heads=module.set_encoder.layers[0].self_attn.num_heads,
+        num_layers=len(module.set_encoder.layers),
+        ffn_dim=module.set_encoder.layers[0].linear1.out_features,
+        num_objects=module.num_objects,
+        mlp_dropout=0.05 if checkpoint_dropout_layout else 0.0,
+    )
+    try:
+        device = next(module.parameters()).device
+        dtype = next(module.parameters()).dtype
+        rebuilt.to(device=device, dtype=dtype)
+    except StopIteration:
+        pass
+    model.trajectory_backbone = rebuilt
+    return True
+
+
 def save_trajectory_branch(model, output_dir: str):
     if not getattr(model, "trajectory_enabled", False):
         return
@@ -550,5 +596,8 @@ def load_trajectory_branch(model, checkpoint_dir: str, strict: bool = True):
             for key, value in state.items()
             if key.startswith(module_name + ".")
         }
+        if module_name == "trajectory_backbone":
+            if _rebuild_trajectory_backbone_for_checkpoint(model, module_state):
+                module = getattr(model, module_name, None)
         module.load_state_dict(module_state, strict=True)
     return True
