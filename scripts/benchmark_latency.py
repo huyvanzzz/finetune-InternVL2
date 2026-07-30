@@ -83,6 +83,7 @@ def build_generation_config(
             "max_new_tokens": int(max_new_tokens),
             "num_beams": int(num_beams),
             "do_sample": bool(do_sample),
+            "use_cache": True,
         }
         validate_latency_generation_config(generation_config)
         return generation_config, {
@@ -97,6 +98,7 @@ def build_generation_config(
             "do_sample": False,
             "repetition_penalty": 1.3,
             "early_stopping": True,
+            "use_cache": True,
         }, {
             "generation_mode": "restore_eval",
             "decode_only_tokens_per_s_valid": False,
@@ -287,6 +289,7 @@ def build_run_metadata(
     quantization_policy: Optional[Dict[str, object]] = None,
     runtime_diagnostics: Optional[Dict[str, object]] = None,
     generation_validity: Optional[Dict[str, object]] = None,
+    optimization_status: Optional[Dict[str, object]] = None,
 ) -> Dict:
     trajectory_cfg = config.get("trajectory", {})
     model_cfg = config.get("model", {})
@@ -312,6 +315,7 @@ def build_run_metadata(
         **(quantization_policy or {}),
         **(runtime_diagnostics or {}),
         **(generation_validity or {}),
+        **(optimization_status or {}),
         "generation_config": dict(generation_config),
         "timing_mode": timing_mode,
     }
@@ -323,6 +327,9 @@ def collect_runtime_diagnostics(torch_module, model) -> Dict[str, object]:
         "torch_cuda_version": getattr(getattr(torch_module, "version", None), "cuda", None),
         "cuda_device_name": None,
         "model_num_image_token": getattr(model, "num_image_token", None),
+        "qformer_text_cache_enabled": bool(getattr(model, "_qformer_text_cache_enabled", False)),
+        "qformer_text_cache_hit_count": int(getattr(model, "_qformer_text_cache_hits", 0)),
+        "qformer_text_cache_miss_count": int(getattr(model, "_qformer_text_cache_misses", 0)),
     }
     try:
         if torch_module.cuda.is_available():
@@ -330,6 +337,30 @@ def collect_runtime_diagnostics(torch_module, model) -> Dict[str, object]:
     except Exception:
         diagnostics["cuda_device_name"] = None
     return diagnostics
+
+
+def compile_qformer_bridge_modules(model, torch_module) -> Dict[str, object]:
+    status = {
+        "compile_qformer_bridge_requested": True,
+        "compile_qformer_bridge_success": False,
+        "compile_qformer_bridge_error": None,
+    }
+    if not getattr(model, "qformer_enabled", False):
+        status["compile_qformer_bridge_error"] = "qformer_not_enabled"
+        return status
+    compile_fn = getattr(torch_module, "compile", None)
+    if not callable(compile_fn):
+        status["compile_qformer_bridge_error"] = "torch_compile_unavailable"
+        return status
+    try:
+        for module_name in ("qformer_input_proj", "qformer", "qformer_to_mlp1_proj"):
+            module = getattr(model, module_name, None)
+            if module is not None:
+                setattr(model, module_name, compile_fn(module, mode="reduce-overhead"))
+        status["compile_qformer_bridge_success"] = True
+    except Exception as exc:
+        status["compile_qformer_bridge_error"] = f"{type(exc).__name__}: {exc}"
+    return status
 
 
 def count_image_patches(sample: Dict) -> Optional[int]:
@@ -507,6 +538,7 @@ def parse_args():
     parser.add_argument("--quantization_mode", default="auto", choices=["auto", "config", "on", "off"])
     parser.add_argument("--object_tracking_mode", default="disabled", choices=["disabled"])
     parser.add_argument("--disable_progress", action="store_true")
+    parser.add_argument("--compile_qformer_bridge", action="store_true")
     return parser.parse_args()
 
 
@@ -601,6 +633,15 @@ def main():
     model.eval()
     if hasattr(model, "language_model"):
         model.language_model.eval()
+    if hasattr(model, "qformer"):
+        model.qformer.eval()
+    optimization_status = {
+        "compile_qformer_bridge_requested": bool(args.compile_qformer_bridge),
+        "compile_qformer_bridge_success": False,
+        "compile_qformer_bridge_error": None,
+    }
+    if args.compile_qformer_bridge:
+        optimization_status = compile_qformer_bridge_modules(model, torch)
     install_extract_feature_latency_hook(model)
     install_runtime_call_counter_hooks(model)
     flash_attention_status = collect_flash_attention_status(model, flash_attention_requested(runtime_config))
@@ -640,49 +681,50 @@ def main():
         should_time_tokens = bool(generation_validity["decode_only_tokens_per_s_valid"])
         if should_time_tokens:
             timed_generation_config["streamer"] = token_streamer
-        if backend is not None and backend.name == "sailvl":
-            with PhaseTimer() as llm_timer:
-                if should_time_tokens:
-                    token_streamer.start()
-                prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, runtime_config)
-            vision_ms = get_model_latency_phase(model, "vision_ms")
-            trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
-        else:
-            with PhaseTimer() as vision_timer:
-                with PhaseTimer() as image_preprocess_timer:
-                    pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
-                phase_ms = getattr(model, "_latency_phase_ms", None)
-                if phase_ms is not None:
-                    phase_ms["image_preprocess_ms"] = (
-                        float(phase_ms.get("image_preprocess_ms", 0.0)) + image_preprocess_timer.elapsed_ms
+        with torch.inference_mode():
+            if backend is not None and backend.name == "sailvl":
+                with PhaseTimer() as llm_timer:
+                    if should_time_tokens:
+                        token_streamer.start()
+                    prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, runtime_config)
+                vision_ms = get_model_latency_phase(model, "vision_ms")
+                trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
+            else:
+                with PhaseTimer() as vision_timer:
+                    with PhaseTimer() as image_preprocess_timer:
+                        pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
+                    phase_ms = getattr(model, "_latency_phase_ms", None)
+                    if phase_ms is not None:
+                        phase_ms["image_preprocess_ms"] = (
+                            float(phase_ms.get("image_preprocess_ms", 0.0)) + image_preprocess_timer.elapsed_ms
+                        )
+                    if getattr(model, "qformer_enabled", False):
+                        qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
+                        q_ids, q_mask = model.encode_qformer_texts([qformer_text] * pixel_values.shape[0], device=pixel_values.device)
+                        model.set_qformer_text(q_ids, q_mask)
+                if getattr(model, "trajectory_enabled", False):
+                    model.set_trajectory_inputs(
+                        sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                        sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                        sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
+                        sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
+                    )
+                with PhaseTimer() as llm_timer:
+                    if should_time_tokens:
+                        token_streamer.start()
+                    prediction = test_infer.run_model_chat(
+                        model,
+                        tokenizer,
+                        pixel_values,
+                        str(sample["question"]),
+                        timed_generation_config,
                     )
                 if getattr(model, "qformer_enabled", False):
-                    qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
-                    q_ids, q_mask = model.encode_qformer_texts([qformer_text] * pixel_values.shape[0], device=pixel_values.device)
-                    model.set_qformer_text(q_ids, q_mask)
-            if getattr(model, "trajectory_enabled", False):
-                model.set_trajectory_inputs(
-                    sample["trajectory_label_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                    sample["trajectory_direction_ids"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                    sample["trajectory_numeric_feats"].unsqueeze(0).repeat(pixel_values.shape[0], 1, 1).cuda(),
-                    sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
-                )
-            with PhaseTimer() as llm_timer:
-                if should_time_tokens:
-                    token_streamer.start()
-                prediction = test_infer.run_model_chat(
-                    model,
-                    tokenizer,
-                    pixel_values,
-                    str(sample["question"]),
-                    timed_generation_config,
-                )
-            if getattr(model, "qformer_enabled", False):
-                model.clear_qformer_text()
-            if getattr(model, "trajectory_enabled", False):
-                model.clear_trajectory_inputs()
-            vision_ms = vision_timer.elapsed_ms + get_model_latency_phase(model, "vision_ms")
-            trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
+                    model.clear_qformer_text()
+                if getattr(model, "trajectory_enabled", False):
+                    model.clear_trajectory_inputs()
+                vision_ms = vision_timer.elapsed_ms + get_model_latency_phase(model, "vision_ms")
+                trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
 
         end_to_end_ms = (time.perf_counter() - end_to_end_start) * 1000.0
         generated_token_count = len(tokenizer.encode(prediction, add_special_tokens=False))
@@ -728,6 +770,7 @@ def main():
             quantization_policy=quantization_policy,
             runtime_diagnostics=collect_runtime_diagnostics(torch, model),
             generation_validity=generation_validity,
+            optimization_status=optimization_status,
         ),
         "samples": samples,
         "summary": summarize_latency_samples(samples),

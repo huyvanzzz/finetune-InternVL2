@@ -365,6 +365,7 @@ def test_latency_generation_mode_defaults_to_greedy_decode_timing():
         "max_new_tokens": 512,
         "num_beams": 1,
         "do_sample": False,
+        "use_cache": True,
     }
     assert validity == {
         "generation_mode": "latency_greedy",
@@ -389,6 +390,7 @@ def test_restore_eval_generation_mode_matches_779_generation_contract():
         "do_sample": False,
         "repetition_penalty": 1.3,
         "early_stopping": True,
+        "use_cache": True,
     }
     assert validity["decode_only_tokens_per_s_valid"] is False
     assert "restore_eval" in validity["decode_only_tokens_per_s_warning"]
@@ -413,3 +415,75 @@ def test_iter_latency_indices_can_disable_progress_for_clean_logs():
     from scripts.benchmark_latency import iter_latency_indices
 
     assert list(iter_latency_indices(3, progress=False)) == [0, 1, 2]
+
+
+def test_qformer_text_encoding_cache_reuses_same_prompt_and_device():
+    from qformer_bridge import _encode_qformer_texts
+
+    class FakeBatch(dict):
+        pass
+
+    class FakeTensor:
+        def __init__(self, value, device="cpu"):
+            self.value = value
+            self.device = device
+
+        def to(self, device):
+            return FakeTensor(self.value, device=str(device))
+
+    class Tokenizer:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, texts, padding, truncation, max_length, return_tensors):
+            self.calls += 1
+            return FakeBatch(
+                input_ids=FakeTensor(tuple(texts)),
+                attention_mask=FakeTensor((padding, truncation, max_length, return_tensors)),
+            )
+
+    class Model:
+        qformer_tokenizer = Tokenizer()
+        qformer_max_text_length = 32
+
+    model = Model()
+
+    first_ids, first_mask = _encode_qformer_texts(model, ["same prompt"] * 3, device="cuda:0")
+    second_ids, second_mask = _encode_qformer_texts(model, ["same prompt"] * 3, device="cuda:0")
+    third_ids, third_mask = _encode_qformer_texts(model, ["same prompt"] * 2, device="cuda:0")
+
+    assert model.qformer_tokenizer.calls == 2
+    assert first_ids is second_ids
+    assert first_mask is second_mask
+    assert third_ids is not first_ids
+    assert third_mask is not first_mask
+    assert model._qformer_text_cache_hits == 1
+    assert model._qformer_text_cache_misses == 2
+
+
+def test_collect_runtime_diagnostics_records_qformer_cache_metadata():
+    from scripts.benchmark_latency import collect_runtime_diagnostics
+
+    class TorchModule:
+        __version__ = "2.test"
+
+        class version:
+            cuda = "12.8"
+
+        class cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+    class Model:
+        num_image_token = 32
+        qformer_enabled = True
+        _qformer_text_cache_enabled = True
+        _qformer_text_cache_hits = 4
+        _qformer_text_cache_misses = 1
+
+    diagnostics = collect_runtime_diagnostics(TorchModule, Model())
+
+    assert diagnostics["qformer_text_cache_enabled"] is True
+    assert diagnostics["qformer_text_cache_hit_count"] == 4
+    assert diagnostics["qformer_text_cache_miss_count"] == 1

@@ -255,10 +255,11 @@ def _extract_feature_with_qformer(self, pixel_values):
     _ensure_bridge_device(self, vit_embeds)
 
     proj_in_dtype = next(self.qformer_input_proj.parameters()).dtype
+    vit_embeds_for_proj = vit_embeds if vit_embeds.dtype == proj_in_dtype else vit_embeds.to(proj_in_dtype)
     encoder_hidden_states = _time_latency_phase(
         self,
         "qformer_projection_ms",
-        lambda: self.qformer_input_proj(vit_embeds.to(proj_in_dtype)),
+        lambda: self.qformer_input_proj(vit_embeds_for_proj),
     )
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.size()[:-1],
@@ -274,8 +275,10 @@ def _extract_feature_with_qformer(self, pixel_values):
             device=encoder_hidden_states.device,
         )
     else:
-        qformer_input_ids = qformer_input_ids.to(encoder_hidden_states.device)
-        qformer_attention_mask = qformer_attention_mask.to(encoder_hidden_states.device)
+        if qformer_input_ids.device != encoder_hidden_states.device:
+            qformer_input_ids = qformer_input_ids.to(encoder_hidden_states.device)
+        if qformer_attention_mask.device != encoder_hidden_states.device:
+            qformer_attention_mask = qformer_attention_mask.to(encoder_hidden_states.device)
 
     if qformer_input_ids.shape[0] != encoder_hidden_states.shape[0]:
         raise ValueError(
@@ -291,8 +294,10 @@ def _extract_feature_with_qformer(self, pixel_values):
     )
     qformer_attention_mask = torch.cat([query_attention_mask, qformer_attention_mask], dim=1)
     qformer_dtype = next(self.qformer.parameters()).dtype
-    encoder_hidden_states = encoder_hidden_states.to(qformer_dtype)
-    query_tokens = query_tokens.to(qformer_dtype)
+    if encoder_hidden_states.dtype != qformer_dtype:
+        encoder_hidden_states = encoder_hidden_states.to(qformer_dtype)
+    if query_tokens.dtype != qformer_dtype:
+        query_tokens = query_tokens.to(qformer_dtype)
     query_outputs = _time_latency_phase(
         self,
         "qformer_forward_ms",
@@ -307,10 +312,11 @@ def _extract_feature_with_qformer(self, pixel_values):
     )
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
+    query_output_for_proj = query_output if query_output.dtype == proj_out_dtype else query_output.to(proj_out_dtype)
     mlp1_inputs = _time_latency_phase(
         self,
         "qformer_projection_ms",
-        lambda: self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype)),
+        lambda: self.qformer_to_mlp1_proj(query_output_for_proj),
     )
     dual_traj_tokens = None
     dual_object_mask = None
@@ -339,7 +345,8 @@ def _extract_feature_with_qformer(self, pixel_values):
         ).to(mlp1_inputs.dtype)
         mlp1_inputs = mlp1_inputs + traj_cls
     mlp1_dtype = next(self.mlp1.parameters()).dtype
-    mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
+    if mlp1_inputs.dtype != mlp1_dtype:
+        mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
     visual_tokens = self.mlp1(mlp1_inputs)
     if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "concat":
         traj_tokens = _time_trajectory_call(
@@ -369,6 +376,23 @@ def _extract_feature_with_qformer(self, pixel_values):
 
 
 def _encode_qformer_texts(self, texts: List[str], device: Optional[torch.device] = None):
+    cache_enabled = bool(getattr(self, "_qformer_text_cache_enabled", True))
+    cache_device = str(device) if device is not None else "cpu"
+    cache_key = (
+        getattr(self, "qformer_bridge_backend", "internvl"),
+        tuple(str(text) for text in texts),
+        int(len(texts)),
+        cache_device,
+        int(getattr(self, "qformer_max_text_length", 0)),
+    )
+    if not hasattr(self, "_qformer_text_cache"):
+        self._qformer_text_cache = {}
+        self._qformer_text_cache_hits = 0
+        self._qformer_text_cache_misses = 0
+    if cache_enabled and cache_key in self._qformer_text_cache:
+        self._qformer_text_cache_hits = int(getattr(self, "_qformer_text_cache_hits", 0)) + 1
+        return self._qformer_text_cache[cache_key]
+
     encoded = self.qformer_tokenizer(
         texts,
         padding=True,
@@ -381,6 +405,9 @@ def _encode_qformer_texts(self, texts: List[str], device: Optional[torch.device]
     if device is not None:
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
+    if cache_enabled:
+        self._qformer_text_cache_misses = int(getattr(self, "_qformer_text_cache_misses", 0)) + 1
+        self._qformer_text_cache[cache_key] = (input_ids, attention_mask)
     return input_ids, attention_mask
 
 
@@ -465,7 +492,9 @@ def attach_qformer_bridge(model, config: Dict, logger=None):
 
     model.qformer_enabled = True
     model.qformer_source_model = q_cfg["source_model"]
+    model.qformer_bridge_backend = "internvl"
     model.qformer_max_text_length = int(q_cfg["max_text_length"])
+    model._qformer_text_cache_enabled = True
     model.qformer_tokenizer = qformer_tokenizer
     model.qformer = qformer
     model.qformer_query_tokens = query_tokens
