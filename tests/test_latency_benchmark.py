@@ -177,3 +177,9 @@ def test_token_timing_streamer_splits_first_token_from_decode_tail():
 
     assert streamer.first_token_ms == pytest.approx(200.0)
     assert streamer.decode_after_first_token_ms == pytest.approx(700.0)
+
+
+def test_iter_latency_indices_can_disable_progress_for_clean_logs():
+    from scripts.benchmark_latency import iter_latency_indices
+
+    assert list(iter_latency_indices(3, progress=False)) == [0, 1, 2]

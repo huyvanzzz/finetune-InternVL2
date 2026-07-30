@@ -36,6 +36,17 @@ def validate_latency_generation_config(generation_config: Dict):
         raise ValueError("Latency benchmark decode-only tokens/s requires do_sample=false.")
 
 
+def iter_latency_indices(sample_limit: int, progress: bool = True):
+    indices = range(int(sample_limit))
+    if not progress:
+        return indices
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return indices
+    return tqdm(indices, desc="Benchmarking latency", unit="sample")
+
+
 def bitsandbytes_available() -> bool:
     try:
         import importlib.metadata
@@ -280,6 +291,7 @@ def parse_args():
     parser.add_argument("--do_sample", action="store_true")
     parser.add_argument("--quantization_mode", default="auto", choices=["auto", "config", "on", "off"])
     parser.add_argument("--object_tracking_mode", default="disabled", choices=["disabled"])
+    parser.add_argument("--disable_progress", action="store_true")
     return parser.parse_args()
 
 
@@ -395,7 +407,7 @@ def main():
 
     samples = []
     sample_limit = len(test_dataset) if args.limit is None else min(args.limit, len(test_dataset))
-    for idx in range(sample_limit):
+    for idx in iter_latency_indices(sample_limit, progress=not args.disable_progress):
         sample = test_dataset[idx]
         if sample is None:
             continue

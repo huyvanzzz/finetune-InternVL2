@@ -98,6 +98,7 @@ Checkout nhanh latency:
 ```bash
 git fetch origin feature/latency-benchmark-matrix
 git checkout -B feature/latency-benchmark-matrix origin/feature/latency-benchmark-matrix
+git pull origin feature/latency-benchmark-matrix
 ```
 
 Neu checkout bi chan boi file `__pycache__/*.pyc`, chay:
@@ -105,6 +106,7 @@ Neu checkout bi chan boi file `__pycache__/*.pyc`, chay:
 ```bash
 git restore '*.pyc'
 git checkout -B feature/latency-benchmark-matrix origin/feature/latency-benchmark-matrix
+git pull origin feature/latency-benchmark-matrix
 ```
 
 Kiem tra dung nhanh:
