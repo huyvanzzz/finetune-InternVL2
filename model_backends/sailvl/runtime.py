@@ -17,11 +17,7 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfi
 from checkpoint_metadata import sanitize_peft_checkpoint_metadata
 from model.conversation import get_conv_template
 from qformer_bridge import qformer_enabled
-from runtime_flash_attention import (
-    enable_flash_attention_for_config,
-    flash_attention_from_pretrained_kwargs,
-    flash_attention_requested,
-)
+from runtime_flash_attention import flash_attention_requested
 
 from .preprocess import preprocess_sail_image
 from .qformer_bridge import (
@@ -328,8 +324,11 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
         model_name_or_path,
         trust_remote_code=config["model"]["trust_remote_code"],
     )
-    enable_flash_attention_for_config(model_config, flash_attention_requested(config))
-    flash_attention_kwargs = flash_attention_from_pretrained_kwargs(config)
+    if flash_attention_requested(config):
+        _log_info(
+            "[FLASH ATTENTION] requested for SAILVL, but not forced via "
+            "attn_implementation because AIMv2Model does not support Flash Attention 2."
+        )
     model = AutoModel.from_pretrained(
         model_name_or_path,
         config=model_config,
@@ -337,7 +336,6 @@ def load_model_and_tokenizer(config: Dict, checkpoint_dir: Optional[str] = None)
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
         trust_remote_code=config["model"]["trust_remote_code"],
-        **flash_attention_kwargs,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, use_fast=False)
     model.img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)

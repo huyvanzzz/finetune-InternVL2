@@ -122,7 +122,7 @@ def test_sail_attach_qformer_if_enabled_calls_bridge(monkeypatch):
     assert called["attached"] is True
 
 
-def test_sail_load_model_requests_flash_attention_2_when_available(monkeypatch):
+def test_sail_load_model_does_not_force_flash_attention_2_for_aimv2(monkeypatch):
     from model_backends.sailvl import runtime
 
     calls = {}
@@ -150,7 +150,6 @@ def test_sail_load_model_requests_flash_attention_2_when_available(monkeypatch):
     monkeypatch.setattr(runtime, "AutoModel", DummyAutoModel)
     monkeypatch.setattr(runtime, "AutoTokenizer", DummyAutoTokenizer)
     monkeypatch.setattr(runtime, "BitsAndBytesConfig", lambda **kwargs: kwargs)
-    monkeypatch.setattr(runtime, "flash_attention_from_pretrained_kwargs", lambda config: {"attn_implementation": "flash_attention_2"})
     monkeypatch.setattr(runtime, "patch_sail_forward_runtime", lambda model: None)
 
     runtime.load_model_and_tokenizer(
@@ -169,7 +168,7 @@ def test_sail_load_model_requests_flash_attention_2_when_available(monkeypatch):
         }
     )
 
-    assert calls["auto_model_kwargs"]["attn_implementation"] == "flash_attention_2"
+    assert "attn_implementation" not in calls["auto_model_kwargs"]
 
 
 def test_prepare_model_for_training_aligns_qformer_bridge(monkeypatch):
