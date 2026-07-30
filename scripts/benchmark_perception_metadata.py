@@ -47,6 +47,14 @@ def summarize(records):
     }
 
 
+def iter_with_progress(iterable, desc: str, unit: str):
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return iterable
+    return tqdm(iterable, desc=desc, unit=unit)
+
+
 def iter_local_sequence_records(args, engine):
     img_root = Path(args.img_root)
     sequence_dirs = sorted([path for path in img_root.iterdir() if path.is_dir()])
@@ -57,7 +65,7 @@ def iter_local_sequence_records(args, engine):
         sequence_dirs = sequence_dirs[: args.limit]
 
     records = []
-    for sequence_dir in sequence_dirs:
+    for sequence_dir in iter_with_progress(sequence_dirs, desc="Benchmarking perception", unit="seq"):
         engine.reset_sequence(sequence_dir.name)
         frame_paths = sorted_frame_paths(sequence_dir, args.frame_glob)
         if not frame_paths:
@@ -100,7 +108,7 @@ def iter_config_dataset_records(args, engine):
 
     sample_count = len(dataset) if args.limit is None else min(args.limit, len(dataset))
     records = []
-    for idx in range(sample_count):
+    for idx in iter_with_progress(range(sample_count), desc="Benchmarking perception", unit="sample"):
         sample_meta = dataset.metadata[idx]
         frame_path = sample_meta["frame_path"]
         frame_ids = dataset._select_frames_safe(frame_path)
