@@ -328,7 +328,7 @@ class TrajectoryBackbone(nn.Module):
 
 
 class TrajectoryCLSHead(nn.Module):
-    def __init__(self, input_dim: int = 128, output_dim: int = 1024, num_heads: int = 4):
+    def __init__(self, input_dim: int = 128, output_dim: int = 1024, num_heads: int = 4, proj_dropout: float = 0.0):
         super().__init__()
         self.cls_query = nn.Parameter(torch.zeros(1, 1, input_dim))
         self.cross_attn = nn.MultiheadAttention(
@@ -337,10 +337,11 @@ class TrajectoryCLSHead(nn.Module):
             batch_first=True,
             dropout=0.0,
         )
-        self.out_proj = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, output_dim),
-        )
+        out_proj_layers = [nn.LayerNorm(input_dim)]
+        if float(proj_dropout) > 0:
+            out_proj_layers.append(nn.Dropout(float(proj_dropout)))
+        out_proj_layers.append(nn.Linear(input_dim, output_dim))
+        self.out_proj = nn.Sequential(*out_proj_layers)
 
     def forward(self, traj_tokens: torch.Tensor, object_mask: torch.Tensor):
         batch_size = traj_tokens.shape[0]
@@ -359,12 +360,13 @@ class TrajectoryCLSHead(nn.Module):
 
 
 class TrajectoryConcatHead(nn.Module):
-    def __init__(self, input_dim: int = 128, output_dim: int = 896):
+    def __init__(self, input_dim: int = 128, output_dim: int = 896, proj_dropout: float = 0.0):
         super().__init__()
-        self.proj = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, output_dim),
-        )
+        proj_layers = [nn.LayerNorm(input_dim)]
+        if float(proj_dropout) > 0:
+            proj_layers.append(nn.Dropout(float(proj_dropout)))
+        proj_layers.append(nn.Linear(input_dim, output_dim))
+        self.proj = nn.Sequential(*proj_layers)
 
     def forward(self, traj_tokens: torch.Tensor):
         return self.proj(traj_tokens)
@@ -550,6 +552,62 @@ def _rebuild_trajectory_backbone_for_checkpoint(model, module_state: Dict[str, t
     return True
 
 
+def _checkpoint_uses_dropout_projection(module_state: Dict[str, torch.Tensor], prefix: str) -> bool:
+    return any(key.startswith(prefix + ".2.") for key in module_state)
+
+
+def _model_uses_dropout_projection(module: nn.Module, attr_name: str) -> bool:
+    projection = getattr(module, attr_name)
+    return any(name.startswith(attr_name + ".2.") for name in module.state_dict()) and isinstance(projection[1], nn.Dropout)
+
+
+def _rebuild_trajectory_cls_head_for_checkpoint(model, module_state: Dict[str, torch.Tensor]) -> bool:
+    module = getattr(model, "trajectory_cls_head", None)
+    if module is None:
+        return False
+    checkpoint_dropout_layout = _checkpoint_uses_dropout_projection(module_state, "out_proj")
+    if checkpoint_dropout_layout == _model_uses_dropout_projection(module, "out_proj"):
+        return False
+
+    rebuilt = TrajectoryCLSHead(
+        input_dim=module.cls_query.shape[-1],
+        output_dim=module.out_proj[-1].out_features,
+        num_heads=module.cross_attn.num_heads,
+        proj_dropout=0.05 if checkpoint_dropout_layout else 0.0,
+    )
+    try:
+        device = next(module.parameters()).device
+        dtype = next(module.parameters()).dtype
+        rebuilt.to(device=device, dtype=dtype)
+    except StopIteration:
+        pass
+    model.trajectory_cls_head = rebuilt
+    return True
+
+
+def _rebuild_trajectory_concat_head_for_checkpoint(model, module_state: Dict[str, torch.Tensor]) -> bool:
+    module = getattr(model, "trajectory_token_projector", None)
+    if module is None:
+        return False
+    checkpoint_dropout_layout = _checkpoint_uses_dropout_projection(module_state, "proj")
+    if checkpoint_dropout_layout == _model_uses_dropout_projection(module, "proj"):
+        return False
+
+    rebuilt = TrajectoryConcatHead(
+        input_dim=module.proj[0].normalized_shape[0],
+        output_dim=module.proj[-1].out_features,
+        proj_dropout=0.05 if checkpoint_dropout_layout else 0.0,
+    )
+    try:
+        device = next(module.parameters()).device
+        dtype = next(module.parameters()).dtype
+        rebuilt.to(device=device, dtype=dtype)
+    except StopIteration:
+        pass
+    model.trajectory_token_projector = rebuilt
+    return True
+
+
 def save_trajectory_branch(model, output_dir: str):
     if not getattr(model, "trajectory_enabled", False):
         return
@@ -598,6 +656,12 @@ def load_trajectory_branch(model, checkpoint_dir: str, strict: bool = True):
         }
         if module_name == "trajectory_backbone":
             if _rebuild_trajectory_backbone_for_checkpoint(model, module_state):
+                module = getattr(model, module_name, None)
+        elif module_name == "trajectory_cls_head":
+            if _rebuild_trajectory_cls_head_for_checkpoint(model, module_state):
+                module = getattr(model, module_name, None)
+        elif module_name == "trajectory_token_projector":
+            if _rebuild_trajectory_concat_head_for_checkpoint(model, module_state):
                 module = getattr(model, module_name, None)
         module.load_state_dict(module_state, strict=True)
     return True

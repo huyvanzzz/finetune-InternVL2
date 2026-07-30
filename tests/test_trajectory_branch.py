@@ -233,13 +233,19 @@ def test_trajectory_save_load_round_trip_and_metadata(tmp_path):
 def test_trajectory_load_rebuilds_backbone_for_dropout_mlp_checkpoint(tmp_path):
     model = _TinyTrajectoryModel("cls_add")
     model.trajectory_backbone = TrajectoryBackbone(vocab_size=5, direction_vocab_size=5, mlp_dropout=0.05)
+    model.trajectory_cls_head = TrajectoryCLSHead(output_dim=1024, proj_dropout=0.05)
+    model.trajectory_token_projector = TrajectoryConcatHead(output_dim=896, proj_dropout=0.05)
     save_trajectory_branch(model, str(tmp_path))
 
     model2 = _TinyTrajectoryModel("cls_add")
 
     assert "numeric_mlp.2.weight" in model2.trajectory_backbone.state_dict()
+    assert "out_proj.1.weight" in model2.trajectory_cls_head.state_dict()
+    assert "proj.1.weight" in model2.trajectory_token_projector.state_dict()
     assert load_trajectory_branch(model2, str(tmp_path), strict=True) is True
     assert "numeric_mlp.3.weight" in model2.trajectory_backbone.state_dict()
+    assert "out_proj.2.weight" in model2.trajectory_cls_head.state_dict()
+    assert "proj.2.weight" in model2.trajectory_token_projector.state_dict()
 
 
 def test_trajectory_load_fails_fast_on_mode_mismatch(tmp_path):
