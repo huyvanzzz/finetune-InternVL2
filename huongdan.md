@@ -203,11 +203,21 @@ CUDA_VISIBLE_DEVICES=0
 Khong dung `accelerate launch`, khong dung `--num_processes 2`, khong chay song song tren GPU nay neu muon so latency sach.
 
 Mac dinh:
+- `generation_mode=latency_greedy`
 - `num_beams=1`
 - `do_sample=false`
 - `warmup_samples=5`
 - `quantization_mode=auto`
 - khong tinh object/tracking, `object_tracking_ms=0.0`
+
+Neu muon check behavior giong eval setup cu cua `restore-779cc7b`, them:
+
+```bash
+--generation_mode restore_eval
+```
+
+Mode nay se ep `num_beams=3`, `do_sample=false`, `repetition_penalty=1.3`, `early_stopping=true`.
+Chi dung mode nay de doi chieu output/behavior; khong dung `decode_only_tokens_per_s` cua mode nay lam metric latency chinh.
 
 ### InternVL Q-Former
 
@@ -217,6 +227,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint minhdang0901/intern-qformer-2707-epoch3 \
   --split test_alter \
   --output_file results/latency_internvl_qformer_epoch3_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -229,6 +240,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint abcdsayhi19/internvl3_2b_no_qformer_2507_epoch3 \
   --split test_alter \
   --output_file results/latency_internvl_no_qformer_epoch3_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -241,6 +253,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint abcdsayhi19/sailvl_1d5_2b_qformer_epoch2 \
   --split test_alter \
   --output_file results/latency_sailvl_qformer_epoch2_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -253,6 +266,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint Ares628/run_sail_no_qformer_epoch3 \
   --split test_alter \
   --output_file results/latency_sailvl_no_qformer_epoch3_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -265,6 +279,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint minhdang0901/intern-qformer-concat-1807-epoch3 \
   --split test_alter \
   --output_file results/latency_internvl_traj_concat_epoch3_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -277,6 +292,7 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.benchmark_latency \
   --checkpoint minhdang0901/intern-pretrain-finetune-cls-2307-epoch2 \
   --split test_alter \
   --output_file results/latency_internvl_traj_cls_epoch2_full.json \
+  --generation_mode latency_greedy \
   --num_beams 1 \
   --warmup_samples 5
 ```
@@ -296,12 +312,29 @@ PY
 ```
 
 Trong `run_metadata`, can check:
+- `generation_mode`
+- `decode_only_tokens_per_s_valid`
 - `flash_attention_requested`
 - `flash_attention_available`
 - `flash_attention_active`
+- `flash_attention_layer_count`
+- `flash_attention_active_layer_count`
+- `torch_version`
+- `torch_cuda_version`
+- `cuda_device_name`
+- `model_num_image_token`
 - `quantization_requested`
 - `quantization_effective`
 - `quantization_disable_reason`
+
+So Q-Former voi No Q-Former theo tung sample:
+
+```bash
+python -m scripts.analyze_latency_pair \
+  --no_qformer_json results/latency_internvl_no_qformer_epoch3_full.json \
+  --qformer_json results/latency_internvl_qformer_epoch3_full.json \
+  --output_file results/latency_internvl_qformer_vs_no_qformer_analysis.json
+```
 
 Trong `summary`, lay 2 metric chinh:
 - `end_to_end_ms`

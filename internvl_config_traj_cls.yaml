@@ -71,6 +71,8 @@ data:
   seed: 42
   response_format: "direct_text"
   alter_only: true
+  direct_text_alter_prompt_mode: "fixed_779"
+  direct_text_qa_prompt_mode: "legacy_779"
 
 training:
   output_dir: "./outputs/internvl3_2b_traj_cls"

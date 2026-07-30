@@ -1,5 +1,5 @@
 experiment:
-  name: "wad_internvl3_training"
+  name: "wad_internvl3_no_qformer_restore_compatible_latency"
   version: "1.0"
   description: "InternVL2-2B for Autonomous Driving"
   tags: ["internvl2", "navigation", "mllm"]
@@ -14,6 +14,15 @@ model:
 
   qformer:
     enabled: false
+    source_model: "Salesforce/instructblip-flan-t5-xl"
+    cache_dir: "./qformer_cache"
+    num_query_tokens: 32
+    freeze_qformer: true
+    freeze_mlp1: true
+    prompt_aware: true
+    max_text_length: 128
+    train_lora_llm: true
+    bridge_mode: "prompt_aware_preproj_mlp1"
 
   lora:
     enabled: true
@@ -47,15 +56,15 @@ data:
   num_frames: 1
   train_split: 0.9
   seed: 42
-  train_task_filter: "alter_only"
-  val_task_filter: "alter_only"
-  eval_limit: 0
   response_format: "direct_text"
-  direct_text_alter_prompt_mode: "balanced_v1"
+  alter_only: true
+  direct_text_alter_prompt_mode: "fixed_779"
+  direct_text_qa_prompt_mode: "legacy_779"
+  non_train_error_policy: "resample"
 
 training:
   output_dir: "./outputs/internvl3_2b_no_qformer"
-  num_epochs: 3
+  num_epochs: 5
   batch_size: 2
   gradient_accumulation_steps: 8
   learning_rate: 2e-4
@@ -74,21 +83,17 @@ training:
   eval_steps: 2000
   save_steps: 2000
   save_total_limit: 2
-  task_balancing:
-    enabled: true
-    qa_weight: 0.25
-    alter_weight: 0.75
   resume_dir: null
   start_epoch: 0
   start_step: 0
   log_token_stats: true
   token_log_batches: 5
-  log_prompt_samples: false
-  prompt_log_batches: 0
+  debug_dataset_stats: true
+  debug_dataset_samples: 2
 
 evaluation:
   metrics: ["exact_match", "field_accuracy"]
-  batch_size: 4
+  batch_size: 1
 
 hardware:
   device: "cuda"

@@ -122,6 +122,56 @@ def test_sail_attach_qformer_if_enabled_calls_bridge(monkeypatch):
     assert called["attached"] is True
 
 
+def test_sail_load_model_requests_flash_attention_2_when_available(monkeypatch):
+    from model_backends.sailvl import runtime
+
+    calls = {}
+    dummy_config = SimpleNamespace()
+    dummy_model = DummyModel()
+
+    class DummyAutoConfig:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["auto_config_kwargs"] = kwargs
+            return dummy_config
+
+    class DummyAutoModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["auto_model_kwargs"] = kwargs
+            return dummy_model
+
+    class DummyAutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return DummyTokenizer()
+
+    monkeypatch.setattr(runtime, "AutoConfig", DummyAutoConfig)
+    monkeypatch.setattr(runtime, "AutoModel", DummyAutoModel)
+    monkeypatch.setattr(runtime, "AutoTokenizer", DummyAutoTokenizer)
+    monkeypatch.setattr(runtime, "BitsAndBytesConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(runtime, "flash_attention_from_pretrained_kwargs", lambda config: {"attn_implementation": "flash_attention_2"})
+    monkeypatch.setattr(runtime, "patch_sail_forward_runtime", lambda model: None)
+
+    runtime.load_model_and_tokenizer(
+        {
+            "model": {
+                "name": "dummy-sail",
+                "trust_remote_code": True,
+                "flash_attention": {"enabled": True},
+                "quantization": {
+                    "enabled": False,
+                    "compute_dtype": "bfloat16",
+                    "double_quant": True,
+                    "type": "nf4",
+                },
+            }
+        }
+    )
+
+    assert calls["auto_model_kwargs"]["attn_implementation"] == "flash_attention_2"
+
+
 def test_prepare_model_for_training_aligns_qformer_bridge(monkeypatch):
     from model_backends.sailvl.runtime import prepare_model_for_training
 

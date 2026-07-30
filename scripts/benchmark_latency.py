@@ -14,6 +14,10 @@ from runtime_flash_attention import (
 
 
 TIMING_MODE = "greedy_decode_token_timing"
+RESTORE_EVAL_TOKEN_WARNING = (
+    "restore_eval uses beam search to match restore-779cc7b eval behavior; "
+    "decode_only_tokens_per_s is recorded for debugging only, not as the primary latency metric."
+)
 
 
 def compute_decode_only_tokens_per_s(generated_token_count: int, decode_after_first_token_seconds: float) -> float:
@@ -34,6 +38,40 @@ def validate_latency_generation_config(generation_config: Dict):
         raise ValueError("Latency benchmark decode-only tokens/s requires num_beams=1.")
     if bool(generation_config.get("do_sample", False)):
         raise ValueError("Latency benchmark decode-only tokens/s requires do_sample=false.")
+
+
+def build_generation_config(
+    generation_mode: str,
+    max_new_tokens: int,
+    num_beams: int,
+    do_sample: bool,
+):
+    mode = str(generation_mode or "latency_greedy").strip().lower()
+    if mode == "latency_greedy":
+        generation_config = {
+            "max_new_tokens": int(max_new_tokens),
+            "num_beams": int(num_beams),
+            "do_sample": bool(do_sample),
+        }
+        validate_latency_generation_config(generation_config)
+        return generation_config, {
+            "generation_mode": "latency_greedy",
+            "decode_only_tokens_per_s_valid": True,
+            "decode_only_tokens_per_s_warning": None,
+        }
+    if mode == "restore_eval":
+        return {
+            "max_new_tokens": int(max_new_tokens),
+            "num_beams": 3,
+            "do_sample": False,
+            "repetition_penalty": 1.3,
+            "early_stopping": True,
+        }, {
+            "generation_mode": "restore_eval",
+            "decode_only_tokens_per_s_valid": False,
+            "decode_only_tokens_per_s_warning": RESTORE_EVAL_TOKEN_WARNING,
+        }
+    raise ValueError(f"Unsupported generation mode: {generation_mode}")
 
 
 def iter_latency_indices(sample_limit: int, progress: bool = True):
@@ -139,13 +177,24 @@ def build_sample_record(
     decode_after_first_token_ms: float,
     object_tracking_included: bool,
     object_tracking_ms: float,
+    question_token_count: Optional[int] = None,
+    num_image_patches: Optional[int] = None,
+    model_num_image_token: Optional[int] = None,
 ) -> Dict:
     decode_seconds = float(decode_after_first_token_ms) / 1000.0
+    image_context_token_count = None
+    if num_image_patches is not None and model_num_image_token is not None:
+        image_context_token_count = int(num_image_patches) * int(model_num_image_token)
+
     return {
         "id": int(sample_id),
         "question": question,
         "prediction": prediction,
         "generated_token_count": int(generated_token_count),
+        "question_token_count": int(question_token_count) if question_token_count is not None else None,
+        "num_image_patches": int(num_image_patches) if num_image_patches is not None else None,
+        "model_num_image_token": int(model_num_image_token) if model_num_image_token is not None else None,
+        "image_context_token_count": image_context_token_count,
         "timing": {
             "end_to_end_ms": float(end_to_end_ms),
             "object_tracking_included": bool(object_tracking_included),
@@ -171,6 +220,8 @@ def build_run_metadata(
     object_tracking_included: bool,
     flash_attention_status: Optional[Dict[str, bool]] = None,
     quantization_policy: Optional[Dict[str, object]] = None,
+    runtime_diagnostics: Optional[Dict[str, object]] = None,
+    generation_validity: Optional[Dict[str, object]] = None,
 ) -> Dict:
     trajectory_cfg = config.get("trajectory", {})
     model_cfg = config.get("model", {})
@@ -178,6 +229,9 @@ def build_run_metadata(
         "flash_attention_requested": flash_attention_requested(config),
         "flash_attention_available": False,
         "flash_attention_active": False,
+        "flash_attention_layer_count": 0,
+        "flash_attention_active_layer_count": 0,
+        "flash_attention_inactive_reason": "not_collected",
     }
     return {
         "config_path": config_path,
@@ -191,9 +245,43 @@ def build_run_metadata(
         "object_tracking_included": bool(object_tracking_included),
         **flash_attention_status,
         **(quantization_policy or {}),
+        **(runtime_diagnostics or {}),
+        **(generation_validity or {}),
         "generation_config": dict(generation_config),
         "timing_mode": timing_mode,
     }
+
+
+def collect_runtime_diagnostics(torch_module, model) -> Dict[str, object]:
+    diagnostics = {
+        "torch_version": getattr(torch_module, "__version__", None),
+        "torch_cuda_version": getattr(getattr(torch_module, "version", None), "cuda", None),
+        "cuda_device_name": None,
+        "model_num_image_token": getattr(model, "num_image_token", None),
+    }
+    try:
+        if torch_module.cuda.is_available():
+            diagnostics["cuda_device_name"] = torch_module.cuda.get_device_name(0)
+    except Exception:
+        diagnostics["cuda_device_name"] = None
+    return diagnostics
+
+
+def count_image_patches(sample: Dict) -> Optional[int]:
+    pixel_values = sample.get("pixel_values")
+    if pixel_values is None:
+        return None
+    try:
+        return sum(int(getattr(pixel_value, "shape", [1])[0]) for pixel_value in pixel_values)
+    except Exception:
+        return None
+
+
+def count_tokens(tokenizer, text: str) -> Optional[int]:
+    try:
+        return len(tokenizer.encode(text, add_special_tokens=False))
+    except Exception:
+        return None
 
 
 def cuda_synchronize_if_available():
@@ -286,6 +374,7 @@ def parse_args():
     parser.add_argument("--output_file", default="results/latency_benchmark.json")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--warmup_samples", type=int, default=5)
+    parser.add_argument("--generation_mode", default="latency_greedy", choices=["latency_greedy", "restore_eval"])
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--do_sample", action="store_true")
@@ -297,12 +386,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    generation_config = {
-        "max_new_tokens": args.max_new_tokens,
-        "num_beams": args.num_beams,
-        "do_sample": bool(args.do_sample),
-    }
-    validate_latency_generation_config(generation_config)
+    generation_config, generation_validity = build_generation_config(
+        generation_mode=args.generation_mode,
+        max_new_tokens=args.max_new_tokens,
+        num_beams=args.num_beams,
+        do_sample=bool(args.do_sample),
+    )
 
     # Full runtime benchmarking is intentionally imported lazily so utility tests stay lightweight.
     import yaml
@@ -411,22 +500,28 @@ def main():
         sample = test_dataset[idx]
         if sample is None:
             continue
+        question = str(sample["question"])
+        num_image_patches = count_image_patches(sample)
+        model_num_image_token = getattr(model, "num_image_token", None)
+        question_token_count = count_tokens(tokenizer, question)
         object_tracking = disabled_object_tracking_timing()
         end_to_end_start = time.perf_counter()
         reset_model_latency_phases(model)
         token_streamer = TokenTimingStreamer()
         timed_generation_config = dict(generation_config)
-        timed_generation_config["streamer"] = token_streamer
+        should_time_tokens = bool(generation_validity["decode_only_tokens_per_s_valid"])
+        if should_time_tokens:
+            timed_generation_config["streamer"] = token_streamer
         if backend is not None and backend.name == "sailvl":
             with PhaseTimer() as llm_timer:
-                token_streamer.start()
+                if should_time_tokens:
+                    token_streamer.start()
                 prediction = backend.generate_response(model, tokenizer, sample, timed_generation_config, runtime_config)
             vision_ms = get_model_latency_phase(model, "vision_ms")
             trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
         else:
             with PhaseTimer() as vision_timer:
                 pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
-                question = str(sample["question"])
                 if getattr(model, "qformer_enabled", False):
                     qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
                     q_ids, q_mask = model.encode_qformer_texts([qformer_text] * pixel_values.shape[0], device=pixel_values.device)
@@ -439,7 +534,8 @@ def main():
                     sample["trajectory_object_mask"].unsqueeze(0).repeat(pixel_values.shape[0], 1).cuda(),
                 )
             with PhaseTimer() as llm_timer:
-                token_streamer.start()
+                if should_time_tokens:
+                    token_streamer.start()
                 prediction = test_infer.run_model_chat(
                     model,
                     tokenizer,
@@ -474,6 +570,9 @@ def main():
                     decode_after_first_token_ms=decode_after_first_token_ms,
                     object_tracking_included=object_tracking["object_tracking_included"],
                     object_tracking_ms=object_tracking["object_tracking_ms"],
+                    question_token_count=question_token_count,
+                    num_image_patches=num_image_patches,
+                    model_num_image_token=model_num_image_token,
                 )
             )
 
@@ -489,6 +588,8 @@ def main():
             object_tracking_included=False,
             flash_attention_status=flash_attention_status,
             quantization_policy=quantization_policy,
+            runtime_diagnostics=collect_runtime_diagnostics(torch, model),
+            generation_validity=generation_validity,
         ),
         "samples": samples,
         "summary": summarize_latency_samples(samples),

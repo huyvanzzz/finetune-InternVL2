@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 
 def test_decode_only_tokens_per_second_excludes_first_token():
@@ -55,10 +56,16 @@ def test_non_trajectory_sample_uses_zero_trajectory_timing():
         decode_after_first_token_ms=7.0,
         object_tracking_included=False,
         object_tracking_ms=0.0,
+        question_token_count=5,
+        num_image_patches=1,
+        model_num_image_token=32,
     )
 
     assert record["timing"]["trajectory_ms"] == 0.0
     assert record["timing"]["decode_only_tokens_per_s"] == pytest.approx(3 / 0.007)
+    assert record["question_token_count"] == 5
+    assert record["num_image_patches"] == 1
+    assert record["image_context_token_count"] == 32
 
 
 def test_run_metadata_records_trajectory_fusion_mode():
@@ -76,11 +83,19 @@ def test_run_metadata_records_trajectory_fusion_mode():
         generation_config={"num_beams": 1, "do_sample": False},
         timing_mode="greedy_decode_token_timing",
         object_tracking_included=False,
+        runtime_diagnostics={
+            "torch_version": "2.11.0+cu128",
+            "torch_cuda_version": "12.8",
+            "cuda_device_name": "NVIDIA GeForce RTX 4090",
+            "model_num_image_token": 32,
+        },
     )
 
     assert metadata["trajectory_enabled"] is True
     assert metadata["trajectory_fusion_mode"] == "concat"
     assert metadata["object_tracking_included"] is False
+    assert metadata["torch_cuda_version"] == "12.8"
+    assert metadata["model_num_image_token"] == 32
 
 
 def test_flash_attention_metadata_records_requested_available_and_active():
@@ -99,12 +114,96 @@ def test_flash_attention_metadata_records_requested_available_and_active():
             "flash_attention_requested": True,
             "flash_attention_available": True,
             "flash_attention_active": True,
+            "flash_attention_layer_count": 2,
+            "flash_attention_active_layer_count": 1,
+            "flash_attention_inactive_reason": None,
         },
     )
 
     assert metadata["flash_attention_requested"] is True
     assert metadata["flash_attention_available"] is True
     assert metadata["flash_attention_active"] is True
+    assert metadata["flash_attention_layer_count"] == 2
+    assert metadata["flash_attention_active_layer_count"] == 1
+    assert metadata["flash_attention_inactive_reason"] is None
+
+
+def test_collect_flash_attention_status_counts_seen_and_active_layers(monkeypatch):
+    import runtime_flash_attention
+
+    class Layer:
+        def __init__(self, use_flash_attn):
+            self.use_flash_attn = use_flash_attn
+
+    class VisionModel:
+        def modules(self):
+            return [Layer(True), Layer(False), object()]
+
+    class Model:
+        vision_model = VisionModel()
+
+    monkeypatch.setattr(runtime_flash_attention, "flash_attention_available", lambda: True)
+
+    status = runtime_flash_attention.collect_flash_attention_status(Model(), requested=True)
+
+    assert status["flash_attention_active"] is True
+    assert status["flash_attention_layer_count"] == 2
+    assert status["flash_attention_active_layer_count"] == 1
+    assert status["flash_attention_inactive_reason"] is None
+
+
+def test_collect_flash_attention_status_detects_attn_implementation(monkeypatch):
+    import runtime_flash_attention
+
+    class Layer(torch.nn.Module):
+        def __init__(self, implementation):
+            super().__init__()
+            self._attn_implementation = implementation
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fast = Layer("flash_attention_2")
+            self.slow = Layer("eager")
+
+    monkeypatch.setattr(runtime_flash_attention, "flash_attention_available", lambda: True)
+
+    status = runtime_flash_attention.collect_flash_attention_status(Model(), requested=True)
+
+    assert status["flash_attention_active"] is True
+    assert status["flash_attention_layer_count"] == 2
+    assert status["flash_attention_active_layer_count"] == 1
+    assert status["flash_attention_inactive_reason"] is None
+
+
+def test_collect_flash_attention_status_records_inactive_reason(monkeypatch):
+    import runtime_flash_attention
+
+    class Model:
+        pass
+
+    monkeypatch.setattr(runtime_flash_attention, "flash_attention_available", lambda: True)
+
+    status = runtime_flash_attention.collect_flash_attention_status(Model(), requested=True)
+
+    assert status["flash_attention_active"] is False
+    assert status["flash_attention_layer_count"] == 0
+    assert status["flash_attention_inactive_reason"] == "no_flash_attention_markers_detected"
+
+
+def test_flash_attention_from_pretrained_kwargs_only_when_available(monkeypatch):
+    import runtime_flash_attention
+
+    config = {"model": {"flash_attention": {"enabled": True}}}
+    monkeypatch.setattr(runtime_flash_attention, "flash_attention_available", lambda: True)
+
+    assert runtime_flash_attention.flash_attention_from_pretrained_kwargs(config) == {
+        "attn_implementation": "flash_attention_2"
+    }
+
+    monkeypatch.setattr(runtime_flash_attention, "flash_attention_available", lambda: False)
+
+    assert runtime_flash_attention.flash_attention_from_pretrained_kwargs(config) == {}
 
 
 def test_auto_quantization_disables_bnb_on_cuda_13():
@@ -162,6 +261,49 @@ def test_latency_generation_config_rejects_beam_search():
 
     with pytest.raises(ValueError, match="do_sample=false"):
         validate_latency_generation_config({"num_beams": 1, "do_sample": True})
+
+
+def test_latency_generation_mode_defaults_to_greedy_decode_timing():
+    from scripts.benchmark_latency import build_generation_config
+
+    generation_config, validity = build_generation_config(
+        generation_mode="latency_greedy",
+        max_new_tokens=512,
+        num_beams=1,
+        do_sample=False,
+    )
+
+    assert generation_config == {
+        "max_new_tokens": 512,
+        "num_beams": 1,
+        "do_sample": False,
+    }
+    assert validity == {
+        "generation_mode": "latency_greedy",
+        "decode_only_tokens_per_s_valid": True,
+        "decode_only_tokens_per_s_warning": None,
+    }
+
+
+def test_restore_eval_generation_mode_matches_779_generation_contract():
+    from scripts.benchmark_latency import build_generation_config
+
+    generation_config, validity = build_generation_config(
+        generation_mode="restore_eval",
+        max_new_tokens=128,
+        num_beams=1,
+        do_sample=True,
+    )
+
+    assert generation_config == {
+        "max_new_tokens": 128,
+        "num_beams": 3,
+        "do_sample": False,
+        "repetition_penalty": 1.3,
+        "early_stopping": True,
+    }
+    assert validity["decode_only_tokens_per_s_valid"] is False
+    assert "restore_eval" in validity["decode_only_tokens_per_s_warning"]
 
 
 def test_token_timing_streamer_splits_first_token_from_decode_tail():
