@@ -9,6 +9,12 @@ sys.path.append(".")
 from qformer_bridge import attach_qformer_bridge, qformer_enabled, trainable_parameter_summary
 
 
+def expected_visual_token_count(model, config):
+    if getattr(model, "trajectory_enabled", False):
+        return int(getattr(model, "num_image_token"))
+    return int(config["model"]["qformer"]["num_query_tokens"])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Smoke test InternVL Q-Former bridge.")
     parser.add_argument("--config", default="internvl_config.yaml")
@@ -61,7 +67,7 @@ def main():
         visual_embeds = model.extract_feature(pixel_values)
     model.clear_qformer_text()
 
-    expected_tokens = config["model"]["qformer"]["num_query_tokens"]
+    expected_tokens = expected_visual_token_count(model, config)
     assert visual_embeds.shape[1] == expected_tokens, visual_embeds.shape
     assert visual_embeds.shape[-1] == model.config.llm_config.hidden_size, visual_embeds.shape
 
