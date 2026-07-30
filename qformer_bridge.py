@@ -43,6 +43,16 @@ def _time_trajectory_call(model, fn):
     return result
 
 
+def _time_latency_phase(model, phase: str, fn):
+    _sync_cuda_if_needed()
+    start = time.perf_counter()
+    result = fn()
+    _sync_cuda_if_needed()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _record_latency_phase(model, phase, elapsed_ms)
+    return result
+
+
 def qformer_enabled(config: Dict) -> bool:
     q_cfg = config.get("qformer", config.get("model", {}).get("qformer", {}))
     return bool(q_cfg.get("enabled", False))
@@ -237,11 +247,19 @@ def _extract_feature_with_qformer(self, pixel_values):
     _sync_cuda_if_needed()
     feature_start = time.perf_counter()
     trajectory_start_ms = float(getattr(self, "_latency_phase_ms", {}).get("trajectory_ms", 0.0))
-    vit_embeds = _extract_vit_tokens(self, pixel_values)
+    vit_embeds = _time_latency_phase(
+        self,
+        "vision_forward_ms",
+        lambda: _extract_vit_tokens(self, pixel_values),
+    )
     _ensure_bridge_device(self, vit_embeds)
 
     proj_in_dtype = next(self.qformer_input_proj.parameters()).dtype
-    encoder_hidden_states = self.qformer_input_proj(vit_embeds.to(proj_in_dtype))
+    encoder_hidden_states = _time_latency_phase(
+        self,
+        "qformer_projection_ms",
+        lambda: self.qformer_input_proj(vit_embeds.to(proj_in_dtype)),
+    )
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.size()[:-1],
         dtype=torch.long,
@@ -275,17 +293,25 @@ def _extract_feature_with_qformer(self, pixel_values):
     qformer_dtype = next(self.qformer.parameters()).dtype
     encoder_hidden_states = encoder_hidden_states.to(qformer_dtype)
     query_tokens = query_tokens.to(qformer_dtype)
-    query_outputs = self.qformer(
-        input_ids=qformer_input_ids,
-        attention_mask=qformer_attention_mask,
-        query_embeds=query_tokens,
-        encoder_hidden_states=encoder_hidden_states,
-        encoder_attention_mask=encoder_attention_mask,
-        return_dict=True,
+    query_outputs = _time_latency_phase(
+        self,
+        "qformer_forward_ms",
+        lambda: self.qformer(
+            input_ids=qformer_input_ids,
+            attention_mask=qformer_attention_mask,
+            query_embeds=query_tokens,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            return_dict=True,
+        ),
     )
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
-    mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    mlp1_inputs = _time_latency_phase(
+        self,
+        "qformer_projection_ms",
+        lambda: self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype)),
+    )
     dual_traj_tokens = None
     dual_object_mask = None
     if getattr(self, "trajectory_enabled", False) and self.trajectory_fusion_mode == "dual":

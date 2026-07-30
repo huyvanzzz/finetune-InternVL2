@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from types import MethodType
 from typing import Dict, Optional
@@ -44,6 +45,27 @@ def _log_info(msg, *args):
         return
     rendered = msg % args if args else msg
     print(rendered)
+
+
+def _sync_cuda_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _record_latency_phase(model, phase: str, elapsed_ms: float):
+    phase_ms = getattr(model, "_latency_phase_ms", None)
+    if phase_ms is not None:
+        phase_ms[phase] = float(phase_ms.get(phase, 0.0)) + float(elapsed_ms)
+
+
+def _time_latency_phase(model, phase: str, fn):
+    _sync_cuda_if_needed()
+    start = time.perf_counter()
+    result = fn()
+    _sync_cuda_if_needed()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _record_latency_phase(model, phase, elapsed_ms)
+    return result
 
 
 def maybe_pad(inner_lists, padding_value):
@@ -387,8 +409,12 @@ def forward_eval_batch(model, batch, config):
 def generate_response(model, tokenizer, sample, generation_config, config):
     patch_sail_forward_runtime(model)
     wrap_input_embeddings_for_safe_scatter(model)
-    pixel_values = preprocess_sail_image(sample["image"][0] if isinstance(sample["image"], list) else sample["image"], config)
-    pixel_values = pixel_values.to(torch.bfloat16).cuda()
+    image = sample["image"][0] if isinstance(sample["image"], list) else sample["image"]
+    pixel_values = _time_latency_phase(
+        model,
+        "image_preprocess_ms",
+        lambda: preprocess_sail_image(image, config).to(torch.bfloat16).cuda(),
+    )
     question = str(sample["question"])
     if getattr(model, "qformer_enabled", False):
         qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())

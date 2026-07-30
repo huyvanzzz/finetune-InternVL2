@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Dict
 
 import torch
@@ -20,6 +21,27 @@ from qformer_bridge import (
 
 BRIDGE_WEIGHTS_NAME = "qformer_bridge.safetensors"
 BRIDGE_CONFIG_NAME = "qformer_bridge_config.json"
+
+
+def _sync_cuda_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _record_latency_phase(model, phase: str, elapsed_ms: float):
+    phase_ms = getattr(model, "_latency_phase_ms", None)
+    if phase_ms is not None:
+        phase_ms[phase] = float(phase_ms.get(phase, 0.0)) + float(elapsed_ms)
+
+
+def _time_latency_phase(model, phase: str, fn):
+    _sync_cuda_if_needed()
+    start = time.perf_counter()
+    result = fn()
+    _sync_cuda_if_needed()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    _record_latency_phase(model, phase, elapsed_ms)
+    return result
 
 
 def _infer_runtime_device_and_dtype(model):
@@ -88,11 +110,21 @@ def _extract_vit_tokens_sail(model, pixel_values):
 
 
 def _extract_feature_with_qformer(self, pixel_values):
-    vit_embeds = _extract_vit_tokens_sail(self, pixel_values)
+    _sync_cuda_if_needed()
+    feature_start = time.perf_counter()
+    vit_embeds = _time_latency_phase(
+        self,
+        "vision_forward_ms",
+        lambda: _extract_vit_tokens_sail(self, pixel_values),
+    )
     _ensure_bridge_device(self, vit_embeds)
 
     proj_in_dtype = next(self.qformer_input_proj.parameters()).dtype
-    encoder_hidden_states = self.qformer_input_proj(vit_embeds.to(proj_in_dtype))
+    encoder_hidden_states = _time_latency_phase(
+        self,
+        "qformer_projection_ms",
+        lambda: self.qformer_input_proj(vit_embeds.to(proj_in_dtype)),
+    )
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.size()[:-1],
         dtype=torch.long,
@@ -126,20 +158,32 @@ def _extract_feature_with_qformer(self, pixel_values):
     qformer_dtype = next(self.qformer.parameters()).dtype
     encoder_hidden_states = encoder_hidden_states.to(qformer_dtype)
     query_tokens = query_tokens.to(qformer_dtype)
-    query_outputs = self.qformer(
-        input_ids=qformer_input_ids,
-        attention_mask=qformer_attention_mask,
-        query_embeds=query_tokens,
-        encoder_hidden_states=encoder_hidden_states,
-        encoder_attention_mask=encoder_attention_mask,
-        return_dict=True,
+    query_outputs = _time_latency_phase(
+        self,
+        "qformer_forward_ms",
+        lambda: self.qformer(
+            input_ids=qformer_input_ids,
+            attention_mask=qformer_attention_mask,
+            query_embeds=query_tokens,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            return_dict=True,
+        ),
     )
     query_output = query_outputs[0][:, : query_tokens.size(1), :]
     proj_out_dtype = next(self.qformer_to_mlp1_proj.parameters()).dtype
-    mlp1_inputs = self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype))
+    mlp1_inputs = _time_latency_phase(
+        self,
+        "qformer_projection_ms",
+        lambda: self.qformer_to_mlp1_proj(query_output.to(proj_out_dtype)),
+    )
     mlp1_dtype = next(self.mlp1.parameters()).dtype
     mlp1_inputs = mlp1_inputs.to(mlp1_dtype)
-    return self.mlp1(mlp1_inputs)
+    visual_tokens = self.mlp1(mlp1_inputs)
+    _sync_cuda_if_needed()
+    total_elapsed_ms = (time.perf_counter() - feature_start) * 1000.0
+    _record_latency_phase(self, "vision_ms", total_elapsed_ms)
+    return visual_tokens
 
 
 def attach_sail_qformer_bridge(model, config: Dict, logger=None):
@@ -190,6 +234,7 @@ def attach_sail_qformer_bridge(model, config: Dict, logger=None):
         model.mlp1.requires_grad_(False)
 
     model.extract_feature = MethodType(_extract_feature_with_qformer, model)
+    model._latency_extract_feature_handles_internal_breakdown = True
     model.encode_qformer_texts = MethodType(_encode_qformer_texts, model)
     model.set_qformer_text = MethodType(_set_qformer_text, model)
     model.clear_qformer_text = MethodType(_clear_qformer_text, model)

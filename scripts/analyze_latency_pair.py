@@ -7,10 +7,17 @@ from typing import Dict, Iterable, List
 
 TIMING_FIELDS = (
     "end_to_end_ms",
+    "e2e_at_20_tokens_ms",
+    "image_preprocess_ms",
+    "vision_forward_ms",
+    "qformer_text_encode_ms",
+    "qformer_forward_ms",
+    "qformer_projection_ms",
     "vision_ms",
     "trajectory_ms",
     "llm_ms",
     "first_token_ms",
+    "ttft_ms",
     "decode_after_first_token_ms",
     "decode_only_tokens_per_s",
 )

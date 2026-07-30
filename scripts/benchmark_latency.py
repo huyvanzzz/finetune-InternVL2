@@ -24,12 +24,37 @@ RUNTIME_CALL_COUNT_FIELDS = {
     "set_qformer_text": "set_qformer_text_call_count",
     "clear_qformer_text": "clear_qformer_text_call_count",
 }
+RUNTIME_METHOD_PHASE_FIELDS = {
+    "encode_qformer_texts": "qformer_text_encode_ms",
+}
+LATENCY_PHASE_FIELDS = (
+    "image_preprocess_ms",
+    "vision_forward_ms",
+    "qformer_text_encode_ms",
+    "qformer_forward_ms",
+    "qformer_projection_ms",
+    "trajectory_ms",
+    "vision_ms",
+)
 
 
 def compute_decode_only_tokens_per_s(generated_token_count: int, decode_after_first_token_seconds: float) -> float:
     if generated_token_count <= 1 or decode_after_first_token_seconds <= 0:
         return 0.0
     return (int(generated_token_count) - 1) / float(decode_after_first_token_seconds)
+
+
+def compute_e2e_at_n_tokens_ms(
+    end_to_end_ms: float,
+    decode_after_first_token_ms: float,
+    decode_only_tokens_per_s: float,
+    target_tokens: int = 20,
+) -> float:
+    if decode_only_tokens_per_s <= 0 or target_tokens <= 1:
+        return 0.0
+    non_decode_tail_ms = float(end_to_end_ms) - float(decode_after_first_token_ms)
+    normalized_decode_tail_ms = ((int(target_tokens) - 1) / float(decode_only_tokens_per_s)) * 1000.0
+    return non_decode_tail_ms + normalized_decode_tail_ms
 
 
 def disabled_object_tracking_timing() -> Dict[str, object]:
@@ -159,9 +184,21 @@ def _metric_summary(values: Iterable[float]) -> Dict[str, float]:
 
 def summarize_latency_samples(samples: List[Dict]) -> Dict:
     timing_rows = [sample["timing"] for sample in samples]
-    breakdown_fields = ("object_tracking_ms", "vision_ms", "trajectory_ms", "llm_ms")
+    breakdown_fields = (
+        "object_tracking_ms",
+        "image_preprocess_ms",
+        "vision_forward_ms",
+        "qformer_text_encode_ms",
+        "qformer_forward_ms",
+        "qformer_projection_ms",
+        "trajectory_ms",
+        "vision_ms",
+        "llm_ms",
+        "ttft_ms",
+    )
     return {
         "end_to_end_ms": _metric_summary(row["end_to_end_ms"] for row in timing_rows),
+        "e2e_at_20_tokens_ms": _metric_summary(row.get("e2e_at_20_tokens_ms", 0.0) for row in timing_rows),
         "decode_only_tokens_per_s": _metric_summary(row["decode_only_tokens_per_s"] for row in timing_rows),
         "breakdown_mean_ms": {
             field: round(mean([float(row.get(field, 0.0)) for row in timing_rows]), 6) if timing_rows else 0.0
@@ -187,12 +224,21 @@ def build_sample_record(
     num_image_patches: Optional[int] = None,
     model_num_image_token: Optional[int] = None,
     runtime_call_counts: Optional[Dict[str, int]] = None,
+    phase_breakdown_ms: Optional[Dict[str, float]] = None,
 ) -> Dict:
     decode_seconds = float(decode_after_first_token_ms) / 1000.0
+    decode_only_tokens_per_s = compute_decode_only_tokens_per_s(generated_token_count, decode_seconds)
+    e2e_at_20_tokens_ms = compute_e2e_at_n_tokens_ms(
+        end_to_end_ms,
+        decode_after_first_token_ms,
+        decode_only_tokens_per_s,
+        target_tokens=20,
+    )
     image_context_token_count = None
     if num_image_patches is not None and model_num_image_token is not None:
         image_context_token_count = int(num_image_patches) * int(model_num_image_token)
     runtime_call_counts = runtime_call_counts or {}
+    phase_breakdown_ms = phase_breakdown_ms or {}
 
     return {
         "id": int(sample_id),
@@ -211,12 +257,19 @@ def build_sample_record(
             "end_to_end_ms": float(end_to_end_ms),
             "object_tracking_included": bool(object_tracking_included),
             "object_tracking_ms": float(object_tracking_ms),
+            "image_preprocess_ms": float(phase_breakdown_ms.get("image_preprocess_ms", 0.0)),
+            "vision_forward_ms": float(phase_breakdown_ms.get("vision_forward_ms", 0.0)),
+            "qformer_text_encode_ms": float(phase_breakdown_ms.get("qformer_text_encode_ms", 0.0)),
+            "qformer_forward_ms": float(phase_breakdown_ms.get("qformer_forward_ms", 0.0)),
+            "qformer_projection_ms": float(phase_breakdown_ms.get("qformer_projection_ms", 0.0)),
             "vision_ms": float(vision_ms),
             "trajectory_ms": float(trajectory_ms or 0.0),
             "llm_ms": float(llm_ms),
             "first_token_ms": float(first_token_ms),
+            "ttft_ms": float(first_token_ms),
             "decode_after_first_token_ms": float(decode_after_first_token_ms),
-            "decode_only_tokens_per_s": compute_decode_only_tokens_per_s(generated_token_count, decode_seconds),
+            "decode_only_tokens_per_s": decode_only_tokens_per_s,
+            "e2e_at_20_tokens_ms": e2e_at_20_tokens_ms,
         },
     }
 
@@ -319,7 +372,7 @@ class PhaseTimer:
 
 def reset_model_latency_phases(model):
     if model is not None:
-        model._latency_phase_ms = {"vision_ms": 0.0, "trajectory_ms": 0.0}
+        model._latency_phase_ms = {field: 0.0 for field in LATENCY_PHASE_FIELDS}
 
 
 def reset_model_runtime_call_counts(model):
@@ -349,11 +402,25 @@ def install_runtime_call_counter_hooks(model):
         if not callable(original_method):
             continue
 
-        def counted_method(*args, _original_method=original_method, _counter_field=counter_field, **kwargs):
+        def counted_method(
+            *args,
+            _original_method=original_method,
+            _counter_field=counter_field,
+            _method_name=method_name,
+            **kwargs,
+        ):
             counts = getattr(model, "_latency_runtime_call_counts", None)
             if counts is not None:
                 counts[_counter_field] = int(counts.get(_counter_field, 0)) + 1
-            return _original_method(*args, **kwargs)
+            phase_field = RUNTIME_METHOD_PHASE_FIELDS.get(_method_name)
+            if phase_field is None:
+                return _original_method(*args, **kwargs)
+            with PhaseTimer() as timer:
+                result = _original_method(*args, **kwargs)
+            phase_ms = getattr(model, "_latency_phase_ms", None)
+            if phase_ms is not None:
+                phase_ms[phase_field] = float(phase_ms.get(phase_field, 0.0)) + timer.elapsed_ms
+            return result
 
         setattr(model, method_name, counted_method)
         hooked_methods.add(method_name)
@@ -363,6 +430,13 @@ def install_runtime_call_counter_hooks(model):
 
 def get_model_latency_phase(model, phase: str) -> float:
     return float(getattr(model, "_latency_phase_ms", {}).get(phase, 0.0))
+
+
+def get_model_latency_phase_breakdown(model) -> Dict[str, float]:
+    return {
+        field: get_model_latency_phase(model, field)
+        for field in LATENCY_PHASE_FIELDS
+    }
 
 
 def install_extract_feature_latency_hook(model):
@@ -380,6 +454,7 @@ def install_extract_feature_latency_hook(model):
         phase_ms = getattr(model, "_latency_phase_ms", None)
         if phase_ms is not None:
             phase_ms["vision_ms"] = float(phase_ms.get("vision_ms", 0.0)) + timer.elapsed_ms
+            phase_ms["vision_forward_ms"] = float(phase_ms.get("vision_forward_ms", 0.0)) + timer.elapsed_ms
         return result
 
     model.extract_feature = timed_extract_feature
@@ -574,7 +649,13 @@ def main():
             trajectory_ms = get_model_latency_phase(model, "trajectory_ms")
         else:
             with PhaseTimer() as vision_timer:
-                pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
+                with PhaseTimer() as image_preprocess_timer:
+                    pixel_values = torch.cat([torch.as_tensor(p) for p in sample["pixel_values"]], dim=0).to(torch.bfloat16).cuda()
+                phase_ms = getattr(model, "_latency_phase_ms", None)
+                if phase_ms is not None:
+                    phase_ms["image_preprocess_ms"] = (
+                        float(phase_ms.get("image_preprocess_ms", 0.0)) + image_preprocess_timer.elapsed_ms
+                    )
                 if getattr(model, "qformer_enabled", False):
                     qformer_text = sample.get("qformer_text", question.replace("<image>", "").strip())
                     q_ids, q_mask = model.encode_qformer_texts([qformer_text] * pixel_values.shape[0], device=pixel_values.device)
@@ -608,6 +689,7 @@ def main():
         first_token_ms = token_streamer.first_token_ms
         decode_after_first_token_ms = token_streamer.decode_after_first_token_ms
         runtime_call_counts = get_model_runtime_call_counts(model)
+        phase_breakdown_ms = get_model_latency_phase_breakdown(model)
 
         if idx >= args.warmup_samples:
             samples.append(
@@ -628,6 +710,7 @@ def main():
                     num_image_patches=num_image_patches,
                     model_num_image_token=model_num_image_token,
                     runtime_call_counts=runtime_call_counts,
+                    phase_breakdown_ms=phase_breakdown_ms,
                 )
             )
 

@@ -3,11 +3,13 @@ import torch
 
 
 def test_decode_only_tokens_per_second_excludes_first_token():
-    from scripts.benchmark_latency import compute_decode_only_tokens_per_s
+    from scripts.benchmark_latency import compute_decode_only_tokens_per_s, compute_e2e_at_n_tokens_ms
 
     assert compute_decode_only_tokens_per_s(6, 0.5) == 10.0
     assert compute_decode_only_tokens_per_s(1, 0.5) == 0.0
     assert compute_decode_only_tokens_per_s(8, 0.0) == 0.0
+    assert compute_e2e_at_n_tokens_ms(1000.0, 500.0, 10.0, target_tokens=20) == 2400.0
+    assert compute_e2e_at_n_tokens_ms(1000.0, 500.0, 0.0, target_tokens=20) == 0.0
 
 
 def test_disabled_object_tracking_timing_is_reserved_for_v2():
@@ -65,10 +67,24 @@ def test_non_trajectory_sample_uses_zero_trajectory_timing():
             "set_qformer_text_call_count": 1,
             "clear_qformer_text_call_count": 1,
         },
+        phase_breakdown_ms={
+            "image_preprocess_ms": 2.0,
+            "vision_forward_ms": 3.0,
+            "qformer_text_encode_ms": 4.0,
+            "qformer_forward_ms": 5.0,
+            "qformer_projection_ms": 6.0,
+        },
     )
 
     assert record["timing"]["trajectory_ms"] == 0.0
     assert record["timing"]["decode_only_tokens_per_s"] == pytest.approx(3 / 0.007)
+    assert record["timing"]["ttft_ms"] == 2.0
+    assert record["timing"]["e2e_at_20_tokens_ms"] == pytest.approx(12.0 - 7.0 + (19 / (3 / 0.007)) * 1000)
+    assert record["timing"]["image_preprocess_ms"] == 2.0
+    assert record["timing"]["vision_forward_ms"] == 3.0
+    assert record["timing"]["qformer_text_encode_ms"] == 4.0
+    assert record["timing"]["qformer_forward_ms"] == 5.0
+    assert record["timing"]["qformer_projection_ms"] == 6.0
     assert record["question_token_count"] == 5
     assert record["num_image_patches"] == 1
     assert record["image_context_token_count"] == 32
@@ -82,6 +98,7 @@ def test_runtime_call_counter_hooks_count_qformer_methods_once():
     from scripts.benchmark_latency import (
         get_model_runtime_call_counts,
         install_runtime_call_counter_hooks,
+        reset_model_latency_phases,
         reset_model_runtime_call_counts,
     )
 
@@ -100,6 +117,7 @@ def test_runtime_call_counter_hooks_count_qformer_methods_once():
 
     model = Model()
     install_runtime_call_counter_hooks(model)
+    reset_model_latency_phases(model)
     reset_model_runtime_call_counts(model)
 
     assert model.extract_feature("pixels") == "pixels"
@@ -113,6 +131,7 @@ def test_runtime_call_counter_hooks_count_qformer_methods_once():
         "set_qformer_text_call_count": 1,
         "clear_qformer_text_call_count": 1,
     }
+    assert model._latency_phase_ms["qformer_text_encode_ms"] >= 0.0
 
 
 def test_runtime_call_counter_defaults_missing_methods_to_zero():
